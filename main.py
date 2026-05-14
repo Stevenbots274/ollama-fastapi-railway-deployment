@@ -30,8 +30,25 @@ OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "qwen2.5:0.5b")
 MASTER_KEY = os.getenv("MASTER_KEY", "ollama-master-key-change-me")
 
-# In-memory API key storage (use Redis/DB in production)
-API_KEYS: Dict[str, Dict[str, Any]] = {}
+# Persistent API key storage
+import json
+DB_PATH = os.path.join(os.getenv("OLLAMA_MODELS", "/root/.ollama/models"), "api_keys.json")
+
+def load_keys():
+    if os.path.exists(DB_PATH):
+        try:
+            with open(DB_PATH, "r") as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+def save_keys(keys):
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    with open(DB_PATH, "w") as f:
+        json.dump(keys, f)
+
+API_KEYS: Dict[str, Dict[str, Any]] = load_keys()
 
 security = HTTPBearer(auto_error=False)
 
@@ -127,6 +144,7 @@ def create_key(req: CreateKeyRequest, master: str = Depends(verify_master_key)):
         "usage_count": 0,
         "key_hash": key_hash
     }
+    save_keys(API_KEYS)
     return {
         "api_key": raw_key,
         "name": req.name,
@@ -141,6 +159,7 @@ def list_keys(master: str = Depends(verify_master_key)):
 def revoke_key(req: RevokeKeyRequest, master: str = Depends(verify_master_key)):
     if req.key_hash in API_KEYS:
         del API_KEYS[req.key_hash]
+        save_keys(API_KEYS)
         return {"status": "revoked"}
     raise HTTPException(status_code=404, detail="Key not found")
 
