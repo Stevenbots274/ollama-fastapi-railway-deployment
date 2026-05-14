@@ -7,18 +7,23 @@ jobs:
   deploy:
     name: Deploy app
     runs-on: ubuntu-latest
-    concurrency: deploy-group    # optional: ensure only one deployment runs at a time
+    concurrency: deploy-group
     steps:
       - uses: actions/checkout@v4
       - uses: superfly/flyctl-actions/setup-flyctl@master
       - name: Create volumes if they don't exist
         run: |
-          # Try to create volumes. If they already exist, the command will fail, so we use || true.
-          # We create 2 volumes in the iad region as requested.
-          flyctl volumes create ollama_data --region iad --count 2 --size 10 --yes || true
+          echo "Checking for existing volumes..."
+          # List volumes and check if 'ollama_data' exists in 'iad'
+          if flyctl volumes list -a ollama-fastapi-railway-deployment | grep -q "ollama_data" && flyctl volumes list -a ollama-fastapi-railway-deployment | grep -q "iad"; then
+            echo "Volumes already exist. Skipping creation."
+          else
+            echo "Volumes not found. Creating 2 volumes in iad..."
+            flyctl volumes create ollama_data --region iad --count 2 --size 10 --yes -a ollama-fastapi-railway-deployment
+          fi
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
       - name: Deploy to Fly.io
-        run: flyctl deploy --remote-only
+        run: flyctl deploy --remote-only -a ollama-fastapi-railway-deployment
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
