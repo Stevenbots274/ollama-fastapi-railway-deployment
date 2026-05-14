@@ -2,7 +2,37 @@
 
 Self-hosted LLM API with API key authentication.
 
-## Deploy to Fly.io
+## Automated Deployment via GitHub Actions
+
+This repository is configured to automatically create volumes and deploy to Fly.io whenever you push to the `main` branch.
+
+### One-Time Setup
+
+To enable automated deployment, you need to add your Fly.io API token to your GitHub repository secrets:
+
+1.  **Get your Fly.io API Token**:
+    *   Go to the [Fly.io Dashboard](https://fly.io/dashboard).
+    *   Navigate to **Account** > **Access Tokens**.
+    *   Create a new token (e.g., named "GitHub Actions").
+    *   Copy the token.
+
+2.  **Add the token to GitHub Secrets**:
+    *   Go to your repository on GitHub: `https://github.com/Phoenix1185/ollama-fastapi-railway-deployment`.
+    *   Click on **Settings** > **Secrets and variables** > **Actions**.
+    *   Click **New repository secret**.
+    *   Name: `FLY_API_TOKEN`.
+    *   Value: Paste your Fly.io API token.
+    *   Click **Add secret**.
+
+### How it Works
+
+*   **Volume Creation**: The workflow automatically runs `flyctl volumes create ollama_data --region iad --count 2 --size 10 --yes`. If the volumes already exist, it will safely continue.
+*   **Deployment**: The workflow then runs `flyctl deploy --remote-only` to deploy your application.
+*   **High Availability**: By default, this setup uses 2 volumes in the `iad` region to support Fly.io's high availability mode.
+
+## Manual Setup (Optional)
+
+If you prefer to manage things manually, you can still use the following commands:
 
 ### 1. Install flyctl and login
 ```bash

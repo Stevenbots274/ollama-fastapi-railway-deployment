@@ -1,4 +1,4 @@
-app = "ollama-fastapi-railway"
+app = "ollama-fastapi-railway-deployment"
 primary_region = "iad"
 
 [build]
