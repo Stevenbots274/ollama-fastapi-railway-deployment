@@ -4,8 +4,9 @@ import secrets
 import hashlib
 import httpx
 import asyncio
+import json
 from fastapi import FastAPI, HTTPException, Depends, Header
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
@@ -32,7 +33,6 @@ DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "qwen2.5:0.5b")
 MASTER_KEY = os.getenv("MASTER_KEY", "ollama-master-key-change-me")
 
 # Persistent API key storage
-import json
 DB_PATH = os.path.join(os.getenv("OLLAMA_MODELS", "/root/.ollama/models"), "api_keys.json")
 
 def load_keys():
@@ -171,19 +171,20 @@ def revoke_key(req: RevokeKeyRequest, master: str = Depends(verify_master_key)):
 # ============ PROTECTED API ENDPOINTS ============
 
 @app.get("/v1/models")
-def list_models(api_key: str = Depends(verify_api_key)):
+async def list_models_v1(api_key: str = Depends(verify_api_key)):
     try:
-        r = requests.get(f"{OLLAMA_HOST}/api/tags", timeout=30)
-        data = r.json()
-        models = []
-        for m in data.get("models", []):
-            models.append({
-                "id": m["name"],
-                "object": "model",
-                "created": int(time.time()),
-                "owned_by": "ollama"
-            })
-        return {"object": "list", "data": models}
+        async with httpx.AsyncClient() as client:
+            r = await client.get(f"{OLLAMA_HOST}/api/tags", timeout=30)
+            data = r.json()
+            models = []
+            for m in data.get("models", []):
+                models.append({
+                    "id": m["name"],
+                    "object": "model",
+                    "created": int(time.time()),
+                    "owned_by": "ollama"
+                })
+            return {"object": "list", "data": models}
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Ollama error: {str(e)}")
 
@@ -202,7 +203,6 @@ async def chat_completions(req: ChatRequest, api_key: str = Depends(verify_api_k
         }
 
         if req.stream:
-            from fastapi.responses import StreamingResponse
             async def streamer():
                 async with httpx.AsyncClient(timeout=None) as client:
                     async with client.stream("POST", f"{OLLAMA_HOST}/api/chat", json=payload) as r:
@@ -232,7 +232,7 @@ async def chat_completions(req: ChatRequest, api_key: str = Depends(verify_api_k
         raise HTTPException(status_code=503, detail=f"Ollama error: {str(e)}")
 
 @app.post("/api/generate")
-def generate(req: GenerateRequest, api_key: str = Depends(verify_api_key)):
+async def generate(req: GenerateRequest, api_key: str = Depends(verify_api_key)):
     model = req.model or DEFAULT_MODEL
     try:
         payload = {
@@ -244,45 +244,50 @@ def generate(req: GenerateRequest, api_key: str = Depends(verify_api_key)):
                 "num_predict": req.max_tokens
             }
         }
-        r = requests.post(f"{OLLAMA_HOST}/api/generate", json=payload, stream=req.stream, timeout=120)
 
         if req.stream:
-            from fastapi.responses import StreamingResponse
-            def streamer():
-                for line in r.iter_lines():
-                    if line:
-                        yield line.decode("utf-8") + "\n"
+            async def streamer():
+                async with httpx.AsyncClient(timeout=None) as client:
+                    async with client.stream("POST", f"{OLLAMA_HOST}/api/generate", json=payload) as r:
+                        async for line in r.aiter_lines():
+                            if line:
+                                yield line + "\n"
             return StreamingResponse(streamer(), media_type="application/x-ndjson")
 
-        return r.json()
+        async with httpx.AsyncClient(timeout=300) as client:
+            r = await client.post(f"{OLLAMA_HOST}/api/generate", json=payload)
+            return r.json()
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Ollama error: {str(e)}")
 
 @app.get("/api/models")
-def ollama_models(api_key: str = Depends(verify_api_key)):
+async def ollama_models(api_key: str = Depends(verify_api_key)):
     try:
-        r = requests.get(f"{OLLAMA_HOST}/api/tags", timeout=30)
-        return r.json()
+        async with httpx.AsyncClient() as client:
+            r = await client.get(f"{OLLAMA_HOST}/api/tags", timeout=30)
+            return r.json()
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Ollama error: {str(e)}")
 
 @app.post("/api/pull")
-def pull_model(req: PullModelRequest, api_key: str = Depends(verify_api_key)):
+async def pull_model(req: PullModelRequest, api_key: str = Depends(verify_api_key)):
     try:
         payload = {"name": req.name, "stream": False}
-        r = requests.post(f"{OLLAMA_HOST}/api/pull", json=payload, timeout=600)
-        return r.json()
+        async with httpx.AsyncClient(timeout=600) as client:
+            r = await client.post(f"{OLLAMA_HOST}/api/pull", json=payload)
+            return r.json()
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Ollama error: {str(e)}")
 
 @app.post("/api/delete")
-def delete_model(req: DeleteModelRequest, api_key: str = Depends(verify_api_key)):
+async def delete_model(req: DeleteModelRequest, api_key: str = Depends(verify_api_key)):
     try:
         payload = {"name": req.name}
-        r = requests.delete(f"{OLLAMA_HOST}/api/delete", json=payload, timeout=30)
-        if r.status_code == 200:
-            return {"status": "success", "message": f"Model {req.name} deleted"}
-        return r.json()
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.request("DELETE", f"{OLLAMA_HOST}/api/delete", json=payload)
+            if r.status_code == 200:
+                return {"status": "success", "message": f"Model {req.name} deleted"}
+            return r.json()
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Ollama error: {str(e)}")
 
@@ -393,218 +398,97 @@ print(res.json())
 <div class="card">
 <h2>cURL Example</h2>
 <div class="code-block">
-curl -X POST <span class='base-url'></span>/v1/chat/completions<br>
--H "Content-Type: application/json"<br>
--H "Authorization: Bearer YOUR_API_KEY"<br>
--d '{"model":"qwen2.5:0.5b","messages":[{"role":"user","content":"Hello!"}]}'
+curl -X POST <span class='base-url'></span>/v1/chat/completions \<br>
+&nbsp;&nbsp;-H "Content-Type: application/json" \<br>
+&nbsp;&nbsp;-H "Authorization: Bearer YOUR_API_KEY" \<br>
+&nbsp;&nbsp;-d '{<br>
+&nbsp;&nbsp;&nbsp;&nbsp;"model": "qwen2.5:0.5b",<br>
+&nbsp;&nbsp;&nbsp;&nbsp;"messages": [{"role": "user", "content": "Hello!"}]<br>
+&nbsp;&nbsp;}'
 </div>
 </div>
 </div>
 </div>
+
 <script>
 const baseUrl = window.location.origin;
+document.querySelectorAll('.base-url').forEach(el => el.textContent = baseUrl);
 document.getElementById('baseUrl').textContent = baseUrl;
-document.querySelectorAll('.base-url').forEach(el=>el.textContent=baseUrl);
-function getApiKey(){return document.getElementById('apiKeyInput').value.trim();}
-function showAlert(msg,isError){
-const el=document.getElementById('keyAlert');
-el.textContent=msg;
-el.style.display='block';
-if(isError){el.classList.add('error');}else{el.classList.remove('error');}
+
+async function checkStatus() {
+    const statusEl = document.getElementById('status');
+    try {
+        const res = await fetch('/health');
+        const data = await res.json();
+        if (data.status === 'ok') {
+            statusEl.innerHTML = '<span class="status ok">ONLINE</span> Ollama is connected';
+        } else {
+            statusEl.innerHTML = '<span class="status warn">DEGRADED</span> Ollama is starting...';
+        }
+    } catch (e) {
+        statusEl.innerHTML = '<span class="status warn">OFFLINE</span> Server unreachable';
+    }
 }
-async function checkHealth(){
-try{
-const res = await fetch(baseUrl + '/health');
-const data = await res.json();
-const el = document.getElementById('status');
-if(data.ollama === 'connected'){
-el.innerHTML = '<span class="status ok">Ollama Connected | Auth Enabled</span>';
-}else{
-el.innerHTML = '<span class="status warn">Ollama Starting...</span>';
+
+async function sendChat() {
+    const input = document.getElementById('chatInput');
+    const key = document.getElementById('apiKeyInput').value;
+    const chatBox = document.getElementById('chatBox');
+    const alert = document.getElementById('keyAlert');
+    
+    if (!key) {
+        alert.textContent = 'Please enter an API key first';
+        alert.style.display = 'block';
+        alert.className = 'alert error';
+        return;
+    }
+    
+    const text = input.value.trim();
+    if (!text) return;
+    
+    alert.style.display = 'none';
+    input.value = '';
+    chatBox.innerHTML += `<div class="message user">${text}</div>`;
+    chatBox.scrollTop = chatBox.scrollHeight;
+    
+    const assistantMsg = document.createElement('div');
+    assistantMsg.className = 'message assistant';
+    assistantMsg.textContent = '...';
+    chatBox.appendChild(assistantMsg);
+    
+    try {
+        const res = await fetch('/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${key}`
+            },
+            body: JSON.stringify({
+                model: 'qwen2.5:0.5b',
+                messages: [{role: 'user', content: text}]
+            })
+        });
+        
+        if (!res.ok) {
+            const err = await res.json();
+            throw new Error(err.detail || 'Failed to connect');
+        }
+        
+        const data = await res.json();
+        assistantMsg.textContent = data.choices[0].message.content;
+    } catch (e) {
+        assistantMsg.textContent = 'Error: ' + e.message;
+        assistantMsg.style.color = '#ff6b6b';
+    }
+    chatBox.scrollTop = chatBox.scrollHeight;
 }
-}catch{
-document.getElementById('status').innerHTML = '<span class="status warn">Server Starting...</span>';
-}
-}
-checkHealth();
-setInterval(checkHealth, 5000);
-async function sendChat(){
-const key = getApiKey();
-if(!key){showAlert("Please enter your API key above",true);return;}
-const input = document.getElementById('chatInput');
-const box = document.getElementById('chatBox');
-const msg = input.value.trim();
-if(!msg) return;
-box.innerHTML += `<div class="message user">${msg}</div>`;
-input.value = '';
-box.scrollTop = box.scrollHeight;
-try{
-const res = await fetch(baseUrl + '/v1/chat/completions', {
-method: 'POST',
-headers: {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key},
-body: JSON.stringify({model: 'qwen2.5:0.5b', messages: [{role: 'user', content: msg}]})
-});
-if(res.status===401){showAlert("Invalid API key!",true);return;}
-const data = await res.json();
-const reply = data.choices?.[0]?.message?.content || 'No response';
-box.innerHTML += `<div class="message assistant">${reply}</div>`;
-box.scrollTop = box.scrollHeight;
-showAlert("Message sent successfully",false);
-}catch(e){
-box.innerHTML += `<div class="message assistant" style="color:#ff6b6b">Error: ${e.message}</div>`;
-}
-}
+
+checkStatus();
+setInterval(checkStatus, 10000);
 </script>
 </body>
-</html>"""
-
-@app.get("/api-docs", response_class=HTMLResponse)
-def api_docs():
-    return """<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>API Documentation - Ollama Server</title>
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0f0f23;color:#e0e0e0;min-height:100vh}
-.container{max-width:1000px;margin:0 auto;padding:40px 20px}
-h1{font-size:2.5rem;margin-bottom:10px;background:linear-gradient(90deg,#00d4ff,#7b2cbf);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
-.subtitle{color:#888;margin-bottom:40px}
-.card{background:#1a1a2e;border:1px solid #2a2a4a;border-radius:12px;padding:24px;margin-bottom:20px}
-.card h2{color:#00d4ff;margin-bottom:16px;font-size:1.2rem}
-.card h3{color:#e0e0e0;margin:20px 0 10px;font-size:1rem}
-.endpoint{background:#0f0f1a;border-left:3px solid #00d4ff;padding:12px 16px;margin:8px 0;border-radius:0 8px 8px 0;font-family:"Courier New",monospace;font-size:.9rem}
-.method{color:#7ee787;font-weight:bold;margin-right:8px}
-.url{color:#dcdcaa}
-.code-block{background:#0f0f1a;border-radius:8px;padding:16px;overflow-x:auto;font-family:"Courier New",monospace;font-size:.85rem;color:#dcdcaa;margin:10px 0}
-.table{width:100%;border-collapse:collapse;margin:10px 0}
-.table th,.table td{padding:10px;text-align:left;border-bottom:1px solid #2a2a4a;font-size:.9rem}
-.table th{color:#00d4ff;font-weight:600}
-.table td{color:#ccc}
-.nav{display:flex;gap:10px;margin-bottom:30px;flex-wrap:wrap}
-.nav a{color:#00d4ff;text-decoration:none;padding:8px 16px;border:1px solid #2a2a4a;border-radius:8px;font-size:.9rem}
-.nav a:hover{background:#1a1a2e}
-.note{background:#1a3a5c;border-left:3px solid #00d4ff;padding:12px 16px;margin:10px 0;border-radius:0 8px 8px 0;font-size:.9rem;color:#e0e0e0}
-.warning{background:#4a3a1a;border-left:3px solid #ffa500;padding:12px 16px;margin:10px 0;border-radius:0 8px 8px 0;font-size:.9rem;color:#ffa500}
-</style>
-</head>
-<body>
-<div class="container">
-<div class="nav">
-<a href="/ui">Dashboard</a>
-<a href="/api-docs">API Docs</a>
-<a href="/docs">Swagger UI</a>
-<a href="/redoc">ReDoc</a>
-</div>
-<h1>API Documentation</h1>
-<p class="subtitle">Complete reference for Ollama FastAPI Server endpoints</p>
-
-<div class="card">
-<h2>Authentication</h2>
-<p style="color:#888;margin-bottom:10px">All API endpoints (except /health and UI pages) require a Bearer token.</p>
-<div class="code-block">Authorization: Bearer YOUR_API_KEY</div>
-<div class="warning">Keep your API keys secret. They grant full access to the LLM API.</div>
-</div>
-
-<div class="card">
-<h2>Key Management (Master Key Required)</h2>
-<p style="color:#888;margin-bottom:10px">Use your MASTER_KEY in the X-Master-Key header to manage API keys.</p>
-<div class="endpoint"><span class="method">POST</span><span class="url">/admin/keys</span> - Create new API key</div>
-<div class="code-block">Headers: X-Master-Key: your-master-key<br>
-Body: {"name": "my-app", "rate_limit": 1000}<br><br>
-Response: {"api_key": "ollama_xxxxx", "warning": "Save this key now!"}</div>
-<div class="endpoint"><span class="method">GET</span><span class="url">/admin/keys</span> - List all keys</div>
-<div class="endpoint"><span class="method">POST</span><span class="url">/admin/keys/revoke</span> - Revoke a key</div>
-<div class="code-block">Body: {"key_hash": "sha256_hash_of_key"}</div>
-</div>
-
-<div class="card">
-<h2>OpenAI-Compatible Endpoints</h2>
-<h3>List Models</h3>
-<div class="endpoint"><span class="method">GET</span><span class="url">/v1/models</span></div>
-<p style="color:#888;margin:8px 0">Returns available models in OpenAI format.</p>
-<div class="code-block">Response:<br>
-{<br>
-&nbsp;&nbsp;"object": "list",<br>
-&nbsp;&nbsp;"data": [{"id": "qwen2.5:0.5b", "object": "model", "created": 1234567890, "owned_by": "ollama"}]<br>
-}</div>
-
-<h3>Chat Completions</h3>
-<div class="endpoint"><span class="method">POST</span><span class="url">/v1/chat/completions</span></div>
-<table class="table">
-<tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr>
-<tr><td>model</td><td>string</td><td>No</td><td>Model name (default: qwen2.5:0.5b)</td></tr>
-<tr><td>messages</td><td>array</td><td>Yes</td><td>[{role, content}]</td></tr>
-<tr><td>stream</td><td>boolean</td><td>No</td><td>Stream response</td></tr>
-<tr><td>temperature</td><td>float</td><td>No</td><td>0.0 - 2.0 (default: 0.7)</td></tr>
-<tr><td>max_tokens</td><td>integer</td><td>No</td><td>Max tokens (default: 2048)</td></tr>
-</table>
-<div class="code-block">curl -X POST <span class="base-url"></span>/v1/chat/completions<br>
--H "Authorization: Bearer YOUR_API_KEY"<br>
--H "Content-Type: application/json"<br>
--d '{"model":"qwen2.5:0.5b","messages":[{"role":"user","content":"Hello!"}]}'</div>
-</div>
-
-<div class="card">
-<h2>Ollama Native Endpoints</h2>
-<h3>Generate Text</h3>
-<div class="endpoint"><span class="method">POST</span><span class="url">/api/generate</span></div>
-<table class="table">
-<tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr>
-<tr><td>model</td><td>string</td><td>No</td><td>Model name</td></tr>
-<tr><td>prompt</td><td>string</td><td>Yes</td><td>Text prompt</td></tr>
-<tr><td>stream</td><td>boolean</td><td>No</td><td>Stream response</td></tr>
-<tr><td>temperature</td><td>float</td><td>No</td><td>Sampling temp</td></tr>
-<tr><td>max_tokens</td><td>integer</td><td>No</td><td>Max tokens</td></tr>
-</table>
-
-<h3>List Models (Native)</h3>
-<div class="endpoint"><span class="method">GET</span><span class="url">/api/models</span></div>
-
-<h3>Pull Model</h3>
-<div class="endpoint"><span class="method">POST</span><span class="url">/api/pull</span></div>
-<div class="code-block">curl -X POST <span class="base-url"></span>/api/pull<br>
--H "Authorization: Bearer YOUR_API_KEY"<br>
--d '{"name": "llama3.2:1b"}'</div>
-</div>
-
-<div class="card">
-<h2>Health Check</h2>
-<div class="endpoint"><span class="method">GET</span><span class="url">/health</span></div>
-<p style="color:#888;margin:8px 0">No auth required. Returns server status.</p>
-</div>
-
-<div class="card">
-<h2>Environment Variables</h2>
-<table class="table">
-<tr><th>Variable</th><th>Default</th><th>Description</th></tr>
-<tr><td>DEFAULT_MODEL</td><td>qwen2.5:0.5b</td><td>Auto-pulled model</td></tr>
-<tr><td>OLLAMA_HOST</td><td>http://localhost:11434</td><td>Internal Ollama URL</td></tr>
-<tr><td>MASTER_KEY</td><td>ollama-master-key-change-me</td><td>Admin key for key management</td></tr>
-</table>
-<div class="warning">Change MASTER_KEY in production! Anyone with it can create/revoke API keys.</div>
-</div>
-
-<div class="card">
-<h2>Available Models</h2>
-<table class="table">
-<tr><th>Model</th><th>Size</th><th>Speed</th><th>Use Case</th></tr>
-<tr><td>qwen2.5:0.5b</td><td>~300MB</td><td>Very Fast</td><td>Default, lightweight</td></tr>
-<tr><td>llama3.2:1b</td><td>~1.3GB</td><td>Fast</td><td>General purpose</td></tr>
-<tr><td>gemma2:2b</td><td>~1.6GB</td><td>Fast</td><td>Google model</td></tr>
-<tr><td>phi3:mini</td><td>~2GB</td><td>Medium</td><td>Microsoft, balanced</td></tr>
-<tr><td>mistral:7b</td><td>~4GB</td><td>Slower</td><td>High quality</td></tr>
-</table>
-</div>
-
-</div>
-<script>
-document.querySelectorAll('.base-url').forEach(el=>el.textContent=window.location.origin);
-</script>
-</body>
-</html>"""
+</html>
+"""
 
 if __name__ == "__main__":
     import uvicorn

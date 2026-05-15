@@ -14,16 +14,17 @@ jobs:
       - name: Create volumes if they don't exist
         run: |
           echo "Checking for existing volumes..."
-          # List volumes and check if 'ollama_data' exists in 'iad'
-          if flyctl volumes list -a ollama-fastapi-railway-deployment | grep -q "ollama_data" && flyctl volumes list -a ollama-fastapi-railway-deployment | grep -q "iad"; then
-            echo "Volumes already exist. Skipping creation."
+          VOLUME_COUNT=$(flyctl volumes list -a ollama-fastapi-railway-deployment --json 2>/dev/null | python3 -c "import sys,json; vols=json.load(sys.stdin); print(len([v for v in vols if v.get('Name')=='ollama_data' and v.get('Region')=='iad']))" 2>/dev/null || echo "0")
+          echo "Found $VOLUME_COUNT existing ollama_data volumes in iad"
+          if [ "$VOLUME_COUNT" -lt "1" ]; then
+            echo "Creating 1 volume in iad..."
+            flyctl volumes create ollama_data --region iad --count 1 --size 10 --yes -a ollama-fastapi-railway-deployment
           else
-            echo "Volumes not found. Creating 2 volumes in iad..."
-            flyctl volumes create ollama_data --region iad --count 2 --size 10 --yes -a ollama-fastapi-railway-deployment
+            echo "Volume already exists. Skipping creation."
           fi
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
       - name: Deploy to Fly.io
-        run: flyctl deploy --remote-only --ha=false -a ollama-fastapi-railway-deployment
+        run: flyctl deploy --remote-only --ha=false -a ollama-fastapi-railway-deployment --wait-timeout 300
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
