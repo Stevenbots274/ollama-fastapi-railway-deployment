@@ -1,5 +1,5 @@
 app = "ollama-fastapi-railway-deployment"
-primary_region = "iad"
+# primary_region removed to allow dynamic selection
 
 [build]
   dockerfile = "Dockerfile"

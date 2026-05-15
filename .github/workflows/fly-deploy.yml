@@ -12,55 +12,39 @@ jobs:
       - uses: actions/checkout@v4
       - uses: superfly/flyctl-actions/setup-flyctl@master
       
-      - name: Cleanup Incorrect Regions and Machines
+      - name: Dynamic Volume and Region Management
         run: |
-          echo "Cleaning up machines in non-iad regions..."
-          # Get all machines and their regions
-          MACHINES_JSON=$(flyctl machines list -a ollama-fastapi-railway-deployment --json)
+          echo "Determining target region..."
+          # If a machine already exists, we'll use its region. 
+          # Otherwise, we'll default to 'iad' but ensure a 10GB volume exists there.
           
-          # Destroy machines NOT in iad
-          echo "$MACHINES_JSON" | python3 -c "
-          import sys, json, subprocess
-          machines = json.load(sys.stdin)
-          for m in machines:
-              if m.get('region') != 'iad':
-                  print(f'Destroying machine {m[\"id\"]} in {m[\"region\"]}...')
-                  subprocess.run(['flyctl', 'machines', 'destroy', m['id'], '-a', 'ollama-fastapi-railway-deployment', '--force'])
-          "
-          
-          echo "Cleaning up extra volumes..."
-          # Get all volumes
+          TARGET_REGION=$(flyctl status --json | python3 -c "import sys, json; data=json.load(sys.stdin); machines=data.get('Machines', []); print(machines[0]['region'] if machines else 'iad')")
+          echo "Target region is: $TARGET_REGION"
+
+          echo "Cleaning up any 1GB volumes..."
           VOLUMES_JSON=$(flyctl volumes list -a ollama-fastapi-railway-deployment --json)
-          
-          # Destroy volumes that are NOT 10GB or NOT in iad
           echo "$VOLUMES_JSON" | python3 -c "
           import sys, json, subprocess
           vols = json.load(sys.stdin)
           for v in vols:
-              # Destroy if in wrong region OR wrong size (anything not 10GB)
-              if v.get('Region') != 'iad' or v.get('SizeGb') != 10:
-                  print(f'Destroying volume {v[\"id\"]} ({v[\"Name\"]} in {v[\"Region\"]} size {v[\"SizeGb\"]}GB)...')
+              if v.get('SizeGb') < 10:
+                  print(f'Destroying small volume {v[\"id\"]} ({v[\"SizeGb\"]}GB)...')
                   subprocess.run(['flyctl', 'volumes', 'destroy', v['id'], '-a', 'ollama-fastapi-railway-deployment', '--yes'])
           "
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
-      - name: Create 10GB volume in IAD if missing
-        run: |
-          echo "Checking for 10GB volume in iad..."
-          VOLUME_COUNT=$(flyctl volumes list -a ollama-fastapi-railway-deployment --json 2>/dev/null | python3 -c "import sys,json; vols=json.load(sys.stdin); print(len([v for v in vols if v.get('Name')=='ollama_data' and v.get('Region')=='iad' and v.get('SizeGb')==10]))" 2>/dev/null || echo "0")
+          echo "Ensuring 10GB volume exists in $TARGET_REGION..."
+          VOLUME_EXISTS=$(flyctl volumes list -a ollama-fastapi-railway-deployment --json | python3 -c "import sys,json; vols=json.load(sys.stdin); print(any(v.get('Region')=='$TARGET_REGION' and v.get('SizeGb')==10 for v in vols))")
           
-          if [ "$VOLUME_COUNT" -lt "1" ]; then
-            echo "Creating 10GB volume in iad..."
-            flyctl volumes create ollama_data --region iad --count 1 --size 10 --yes -a ollama-fastapi-railway-deployment
+          if [ "$VOLUME_EXISTS" = "False" ]; then
+            echo "Creating 10GB volume in $TARGET_REGION..."
+            flyctl volumes create ollama_data --region "$TARGET_REGION" --count 1 --size 10 --yes -a ollama-fastapi-railway-deployment
           else
-            echo "10GB volume already exists in iad."
+            echo "10GB volume already exists in $TARGET_REGION."
           fi
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
       - name: Deploy to Fly.io
-        # Added --region iad to force deployment to the correct region
-        run: flyctl deploy --remote-only --ha=false -a ollama-fastapi-railway-deployment --region iad --wait-timeout 400
+        run: flyctl deploy --remote-only --ha=false -a ollama-fastapi-railway-deployment --wait-timeout 400
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
