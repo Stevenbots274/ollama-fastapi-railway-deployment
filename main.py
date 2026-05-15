@@ -2,7 +2,8 @@ import os
 import time
 import secrets
 import hashlib
-import requests
+import httpx
+import asyncio
 from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -127,10 +128,11 @@ def root():
     }
 
 @app.get("/health")
-def health():
+async def health():
     try:
-        r = requests.get(f"{OLLAMA_HOST}/api/tags", timeout=5)
-        return {"status": "ok", "ollama": "connected", "auth": "enabled"}
+        async with httpx.AsyncClient() as client:
+            r = await client.get(f"{OLLAMA_HOST}/api/tags", timeout=5)
+            return {"status": "ok", "ollama": "connected", "auth": "enabled"}
     except:
         return {"status": "degraded", "ollama": "not ready", "auth": "enabled"}
 
@@ -186,7 +188,7 @@ def list_models(api_key: str = Depends(verify_api_key)):
         raise HTTPException(status_code=503, detail=f"Ollama error: {str(e)}")
 
 @app.post("/v1/chat/completions")
-def chat_completions(req: ChatRequest, api_key: str = Depends(verify_api_key)):
+async def chat_completions(req: ChatRequest, api_key: str = Depends(verify_api_key)):
     model = req.model or DEFAULT_MODEL
     try:
         payload = {
@@ -198,35 +200,34 @@ def chat_completions(req: ChatRequest, api_key: str = Depends(verify_api_key)):
                 "num_predict": req.max_tokens
             }
         }
-        # Use a longer timeout for LLM generation
-        r = requests.post(f"{OLLAMA_HOST}/api/chat", json=payload, stream=req.stream, timeout=300)
 
         if req.stream:
             from fastapi.responses import StreamingResponse
-            def streamer():
-                try:
-                    for line in r.iter_lines():
-                        if line:
-                            yield line.decode("utf-8") + "\n"
-                except Exception as e:
-                    yield f'{{"error": "Stream interrupted: {str(e)}"}}'
+            async def streamer():
+                async with httpx.AsyncClient(timeout=None) as client:
+                    async with client.stream("POST", f"{OLLAMA_HOST}/api/chat", json=payload) as r:
+                        async for line in r.aiter_lines():
+                            if line:
+                                yield line + "\n"
             return StreamingResponse(streamer(), media_type="text/event-stream")
 
-        data = r.json()
-        return {
-            "id": f"chatcmpl-{int(time.time())}",
-            "object": "chat.completion",
-            "created": int(time.time()),
-            "model": model,
-            "choices": [{
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": data.get("message", {}).get("content", "")
-                },
-                "finish_reason": "stop"
-            }]
-        }
+        async with httpx.AsyncClient(timeout=300) as client:
+            r = await client.post(f"{OLLAMA_HOST}/api/chat", json=payload)
+            data = r.json()
+            return {
+                "id": f"chatcmpl-{int(time.time())}",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": model,
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": data.get("message", {}).get("content", "")
+                    },
+                    "finish_reason": "stop"
+                }]
+            }
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Ollama error: {str(e)}")
 

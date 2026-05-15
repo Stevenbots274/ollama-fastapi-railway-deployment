@@ -20,10 +20,10 @@ for i in {1..90}; do
     sleep 1
 done
 
-# Pull default model if not exists
+# Pull default model if not exists in background
 DEFAULT_MODEL=${DEFAULT_MODEL:-qwen2.5:0.5b}
-echo "Pulling model: $DEFAULT_MODEL"
-ollama pull $DEFAULT_MODEL || echo "Model pull failed, will retry on first request"
+echo "Pulling model: $DEFAULT_MODEL in background..."
+ollama pull $DEFAULT_MODEL > /dev/null 2>&1 &
 
 # Start FastAPI
 echo "Starting FastAPI on port 8000..."
