@@ -94,6 +94,9 @@ class GenerateRequest(BaseModel):
 class PullModelRequest(BaseModel):
     name: str
 
+class DeleteModelRequest(BaseModel):
+    name: str
+
 class CreateKeyRequest(BaseModel):
     name: str
     rate_limit: Optional[int] = 1000  # requests per hour
@@ -195,14 +198,18 @@ def chat_completions(req: ChatRequest, api_key: str = Depends(verify_api_key)):
                 "num_predict": req.max_tokens
             }
         }
-        r = requests.post(f"{OLLAMA_HOST}/api/chat", json=payload, stream=req.stream, timeout=120)
+        # Use a longer timeout for LLM generation
+        r = requests.post(f"{OLLAMA_HOST}/api/chat", json=payload, stream=req.stream, timeout=300)
 
         if req.stream:
             from fastapi.responses import StreamingResponse
             def streamer():
-                for line in r.iter_lines():
-                    if line:
-                        yield line.decode("utf-8") + "\n"
+                try:
+                    for line in r.iter_lines():
+                        if line:
+                            yield line.decode("utf-8") + "\n"
+                except Exception as e:
+                    yield f'{{"error": "Stream interrupted: {str(e)}"}}'
             return StreamingResponse(streamer(), media_type="text/event-stream")
 
         data = r.json()
@@ -262,7 +269,18 @@ def ollama_models(api_key: str = Depends(verify_api_key)):
 def pull_model(req: PullModelRequest, api_key: str = Depends(verify_api_key)):
     try:
         payload = {"name": req.name, "stream": False}
-        r = requests.post(f"{OLLAMA_HOST}/api/pull", json=payload, timeout=300)
+        r = requests.post(f"{OLLAMA_HOST}/api/pull", json=payload, timeout=600)
+        return r.json()
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Ollama error: {str(e)}")
+
+@app.post("/api/delete")
+def delete_model(req: DeleteModelRequest, api_key: str = Depends(verify_api_key)):
+    try:
+        payload = {"name": req.name}
+        r = requests.delete(f"{OLLAMA_HOST}/api/delete", json=payload, timeout=30)
+        if r.status_code == 200:
+            return {"status": "success", "message": f"Model {req.name} deleted"}
         return r.json()
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Ollama error: {str(e)}")
