@@ -40,8 +40,6 @@ app.add_middleware(
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     logger.error("DATABASE_URL environment variable is not set")
-    # Don't raise error here, let the app start so health checks can pass
-    # Endpoints requiring DB will fail gracefully later
 
 engine = None
 SessionLocal = None
@@ -58,11 +56,9 @@ def init_db():
     global engine, SessionLocal
     if not DATABASE_URL:
         return
-    
     try:
         engine = create_engine(DATABASE_URL, pool_pre_ping=True)
         SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-        # Create tables if they don't exist
         Base.metadata.create_all(bind=engine)
         logger.info("Database initialized successfully")
     except Exception as e:
@@ -70,7 +66,6 @@ def init_db():
 
 @app.on_event("startup")
 async def startup_event():
-    # Run DB init in background or during startup but catch errors
     init_db()
 
 # Security
@@ -141,15 +136,12 @@ async def chat_completions(request: ChatCompletionRequest, api_key = Depends(ver
                 "messages": [m.dict() for m in request.messages],
                 "stream": request.stream
             }
-            
             async with client.stream("POST", f"{OLLAMA_HOST}/api/chat", json=ollama_req) as response:
                 if response.status_code != 200:
                     error_detail = await response.aread()
                     raise HTTPException(status_code=response.status_code, detail=error_detail.decode())
-                
                 async for line in response.aiter_lines():
-                    if not line:
-                        continue
+                    if not line: continue
                     data = json.loads(line)
                     chunk = {
                         "id": f"chatcmpl-{secrets.token_hex(12)}",
@@ -177,7 +169,6 @@ async def chat_completions(request: ChatCompletionRequest, api_key = Depends(ver
         resp = await client.post(f"{OLLAMA_HOST}/api/chat", json=ollama_req)
         if resp.status_code != 200:
             raise HTTPException(status_code=resp.status_code, detail=resp.text)
-        
         data = resp.json()
         return {
             "id": f"chatcmpl-{secrets.token_hex(12)}",
@@ -189,14 +180,10 @@ async def chat_completions(request: ChatCompletionRequest, api_key = Depends(ver
                 "message": data.get("message"),
                 "finish_reason": "stop"
             }],
-            "usage": {
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "total_tokens": 0
-            }
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         }
 
-# Admin Endpoints for API Key Management
+# Admin Endpoints
 async def verify_master_key(x_master_key: str = Header(...)):
     if x_master_key != MASTER_KEY:
         raise HTTPException(status_code=403, detail="Invalid Master Key")
@@ -204,23 +191,18 @@ async def verify_master_key(x_master_key: str = Header(...)):
 
 @app.post("/admin/keys", dependencies=[Depends(verify_master_key)])
 async def create_api_key(key_data: APIKeyCreate, db = Depends(get_db)):
-    new_key = secrets.token_urlsafe(32) # Generate a URL-safe key
+    new_key = secrets.token_urlsafe(32)
     key_hash = hashlib.sha256(new_key.encode()).hexdigest()
     db_key = APIKey(key_hash=key_hash, name=key_data.name)
     db.add(db_key)
     db.commit()
     db.refresh(db_key)
-    return {"api_key": f"ollama_{new_key}", "warning": "Save this key now! It will not be shown again.", "key_id": db_key.id}
+    return {"api_key": f"ollama_{new_key}", "warning": "Save this key now!", "key_id": db_key.id}
 
 @app.get("/admin/keys", dependencies=[Depends(verify_master_key)])
 async def list_api_keys(db = Depends(get_db)):
     keys = db.query(APIKey).all()
-    return [{
-        "id": k.id,
-        "name": k.name,
-        "key_hash": k.key_hash, # For debugging, normally wouldn't expose hash
-        "created_at": k.created_at
-    } for k in keys]
+    return [{"id": k.id, "name": k.name, "key_hash": k.key_hash, "created_at": k.created_at} for k in keys]
 
 @app.post("/admin/keys/revoke", dependencies=[Depends(verify_master_key)])
 async def revoke_api_key(revoke_data: APIKeyRevoke, db = Depends(get_db)):
@@ -231,6 +213,7 @@ async def revoke_api_key(revoke_data: APIKeyRevoke, db = Depends(get_db)):
     db.commit()
     return {"message": "API Key revoked successfully"}
 
+@app.get("/UI", response_class=HTMLResponse)
 @app.get("/", response_class=HTMLResponse)
 async def index():
     return """
@@ -271,169 +254,66 @@ async def index():
         <p>Status: <span id="status-dot" class="status offline"></span><span id="status-text">Checking...</span></p>
         <h3>Quick Test</h3>
         <div id="chat-box"></div>
-        <input type="text" id="user-input" placeholder="Type a message..." onkeypress="if(event.key===\'Enter\') sendMessage()">
+        <input type="text" id="user-input" placeholder="Type a message..." onkeypress="if(event.key==='Enter') sendMessage()">
         <button onclick="sendMessage()">Send</button>
     </div>
-
     <div class="card">
         <h2>API Usage</h2>
         <p>All API endpoints require authentication with a Bearer token.</p>
         <div class="code-block">Authorization: Bearer YOUR_API_KEY</div>
         <div class="warning">Keep your API keys secret. They grant full access to the LLM API.</div>
     </div>
-
     <div class="card">
         <h2>Key Management (Master Key Required)</h2>
         <p style="color:#888;margin-bottom:10px">Use your MASTER_KEY in the X-Master-Key header to manage API keys.</p>
         <div class="endpoint"><span class="method">POST</span><span class="url">/admin/keys</span> - Create new API key</div>
-        <div class="code-block">Headers: X-Master-Key: your-master-key<br>
-Body: {\"name\": \"my-app\", \"rate_limit\": 1000}<br><br>
-Response: {\"api_key\": \"ollama_xxxxx\", \"warning\": \"Save this key now!\"}</div>
+        <div class="code-block">Headers: X-Master-Key: your-master-key<br>Body: {"name": "my-app", "rate_limit": 1000}<br><br>Response: {"api_key": "ollama_xxxxx", "warning": "Save this key now!"}</div>
         <div class="endpoint"><span class="method">GET</span><span class="url">/admin/keys</span> - List all keys</div>
         <div class="endpoint"><span class="method">POST</span><span class="url">/admin/keys/revoke</span> - Revoke a key</div>
-        <div class="code-block">Body: {\"key_hash\": \"sha256_hash_of_key\"}</div>
     </div>
-
     <div class="card">
         <h2>OpenAI-Compatible Endpoints</h2>
-        <h3>List Models</h3>
-        <div class="endpoint"><span class="method">GET</span><span class="url">/v1/models</span></div>
-        <p style="color:#888;margin:8px 0">Returns available models in OpenAI format.</p>
-        <div class="code-block">Response:<br>
-{
-&nbsp;&nbsp;\"object\": \"list\",<br>
-&nbsp;&nbsp;\"data\": [{\"id\": \"qwen2.5:0.5b\", \"object\": \"model\", \"created\": 1234567890, \"owned_by\": \"ollama\"}]
-}</div>
         <h3>Chat Completions</h3>
         <div class="endpoint"><span class="method">POST</span><span class="url">/v1/chat/completions</span></div>
-        <table class="table">
-            <tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr>
-            <tr><td>model</td><td>string</td><td>No</td><td>Model name (default: qwen2.5:0.5b)</td></tr>
-            <tr><td>messages</td><td>array</td><td>Yes</td><td>[{role, content}]</td></tr>
-            <tr><td>stream</td><td>boolean</td><td>No</td><td>Stream response</td></tr>
-            <tr><td>temperature</td><td>float</td><td>No</td><td>0.0 - 2.0 (default: 0.7)</td></tr>
-            <tr><td>max_tokens</td><td>integer</td><td>No</td><td>Max tokens (default: 2048)</td></tr>
-        </table>
-        <div class="code-block">curl -X POST <span class="base-url"></span>/v1/chat/completions<br>
--H \"Authorization: Bearer YOUR_API_KEY\"<br>
--H \"Content-Type: application/json\"<br>
--d \'{\"model\":\"qwen2.5:0.5b\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello!\"}]}\'</div>
+        <div class="code-block">curl -X POST <span class="base-url"></span>/v1/chat/completions<br>-H "Authorization: Bearer YOUR_API_KEY"<br>-H "Content-Type: application/json"<br>-d '{"model":"qwen2.5:0.5b","messages":[{"role":"user","content":"Hello!"}]}'</div>
     </div>
-
-    <div class="card">
-        <h2>Ollama Native Endpoints</h2>
-        <h3>Generate Text</h3>
-        <div class="endpoint"><span class="method">POST</span><span class="url">/api/generate</span></div>
-        <table class="table">
-            <tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr>
-            <tr><td>model</td><td>string</td><td>No</td><td>Model name</td></tr>
-            <tr><td>prompt</td><td>string</td><td>Yes</td><td>Text prompt</td></tr>
-            <tr><td>stream</td><td>boolean</td><td>No</td><td>Stream response</td></tr>
-            <tr><td>temperature</td><td>float</td><td>No</td><td>Sampling temp</td></tr>
-            <tr><td>max_tokens</td><td>integer</td><td>No</td><td>Max tokens</td></tr>
-        </table>
-        <h3>List Models (Native)</h3>
-        <div class="endpoint"><span class="method">GET</span><span class="url">/api/models</span></div>
-        <h3>Pull Model</h3>
-        <div class="endpoint"><span class="method">POST</span><span class="url">/api/pull</span></div>
-        <div class="code-block">curl -X POST <span class="base-url"></span>/api/pull<br>
--H \"Authorization: Bearer YOUR_API_KEY\"<br>
--d \'{\"name\": \"llama3.2:1b\"}\'</div>
-    </div>
-
-    <div class="card">
-        <h2>Health Check</h2>
-        <div class="endpoint"><span class="method">GET</span><span class="url">/health</span></div>
-        <p style="color:#888;margin:8px 0">No auth required. Returns server status.</p>
-    </div>
-
-    <div class="card">
-        <h2>Environment Variables</h2>
-        <table class="table">
-            <tr><th>Variable</th><th>Default</th><th>Description</th></tr>
-            <tr><td>DEFAULT_MODEL</td><td>qwen2.5:0.5b</td><td>Auto-pulled model</td></tr>
-            <tr><td>OLLAMA_HOST</td><td>http://localhost:11434</td><td>Internal Ollama URL</td></tr>
-            <tr><td>MASTER_KEY</td><td>ollama-master-key-change-me</td><td>Admin key for key management</td></tr>
-        </table>
-        <div class="warning">Change MASTER_KEY in production! Anyone with it can create/revoke API keys.</div>
-    </div>
-
-    <div class="card">
-        <h2>Available Models</h2>
-        <table class="table">
-            <tr><th>Model</th><th>Size</th><th>Speed</th><th>Use Case</th></tr>
-            <tr><td>qwen2.5:0.5b</td><td>~300MB</td><td>Very Fast</td><td>Default, lightweight</td></tr>
-            <tr><td>llama3.2:1b</td><td>~1.3GB</td><td>Fast</td><td>General purpose</td></tr>
-            <tr><td>gemma2:2b</td><td>~1.6GB</td><td>Fast</td><td>Google model</td></tr>
-            <tr><td>phi3:mini</td><td>~2GB</td><td>Medium</td><td>Microsoft, balanced</td></tr>
-            <tr><td>mistral:7b</td><td>~4GB</td><td>Slower</td><td>High quality</td></tr>
-        </table>
-    </div>
-
     <script>
-        document.querySelectorAll(\".base-url\").forEach(el=>el.textContent=window.location.origin);
+        document.querySelectorAll(".base-url").forEach(el=>el.textContent=window.location.origin);
         async function checkStatus() {
             try {
-                const res = await fetch(\"/health\");
+                const res = await fetch("/health");
                 const data = await res.json();
-                const dot = document.getElementById(\"status-dot\");
-                const text = document.getElementById(\"status-text\");
-                if (data.ollama) {
-                    dot.className = \"status online\";
-                    text.textContent = \"Ollama Online\";
-                } else {
-                    dot.className = \"status offline\";
-                    text.textContent = \"Ollama Starting...\";
-                }
-            } catch (e) {
-                console.error(e);
-            }
+                const dot = document.getElementById("status-dot");
+                const text = document.getElementById("status-text");
+                if (data.ollama) { dot.className = "status online"; text.textContent = "Ollama Online"; }
+                else { dot.className = "status offline"; text.textContent = "Ollama Starting..."; }
+            } catch (e) { console.error(e); }
         }
         async function sendMessage() {
-            const input = document.getElementById(\"user-input\");
+            const input = document.getElementById("user-input");
             const text = input.value.trim();
             if (!text) return;
-            
-            const key = prompt(\"Enter your API Key to test:\");
+            const key = prompt("Enter your API Key to test:");
             if (!key) return;
-
-            input.value = \"\";
-            const chatBox = document.getElementById(\"chat-box\");
-            chatBox.innerHTML += `<div class=\"message user\">${text}</div>`;
-            chatBox.scrollTop = chatBox.scrollHeight;
-
-            const assistantMsg = document.createElement(\"div\");
-            assistantMsg.className = \"message assistant\";
-            assistantMsg.textContent = \"...\";
+            input.value = "";
+            const chatBox = document.getElementById("chat-box");
+            chatBox.innerHTML += `<div class="message user">${text}</div>`;
+            const assistantMsg = document.createElement("div");
+            assistantMsg.className = "message assistant";
+            assistantMsg.textContent = "...";
             chatBox.appendChild(assistantMsg);
-
             try {
-                const res = await fetch(\"/v1/chat/completions\", {
-                    method: \"POST\",
-                    headers: {
-                        \"Content-Type\": \"application/json\",
-                        \"Authorization\": `Bearer ${key}`
-                    },
-                    body: JSON.stringify({
-                        model: \"qwen2.5:0.5b\",
-                        messages: [{role: \"user\", content: text}]
-                    })
+                const res = await fetch("/v1/chat/completions", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${key}` },
+                    body: JSON.stringify({ model: "qwen2.5:0.5b", messages: [{role: "user", content: text}] })
                 });
-                
-                if (!res.ok) {
-                    const err = await res.json();
-                    throw new Error(err.detail || \"Failed to connect\");
-                }
-
+                if (!res.ok) { const err = await res.json(); throw new Error(err.detail || "Failed to connect"); }
                 const data = await res.json();
                 assistantMsg.textContent = data.choices[0].message.content;
-            } catch (e) {
-                assistantMsg.textContent = \"Error: \" + e.message;
-                assistantMsg.style.color = \"#ff6b6b\";
-            }
+            } catch (e) { assistantMsg.textContent = "Error: " + e.message; assistantMsg.style.color = "#ff6b6b"; }
             chatBox.scrollTop = chatBox.scrollHeight;
         }
-        
         checkStatus();
         setInterval(checkStatus, 10000);
     </script>
