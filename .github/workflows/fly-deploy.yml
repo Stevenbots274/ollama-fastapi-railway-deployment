@@ -15,17 +15,24 @@ jobs:
       - name: Destroy all volumes NOT in iad region
         run: |
           echo "Listing all volumes..."
-          VOLUMES_JSON=$(flyctl volumes list -a ollama-fastapi-railway-deployment --json)
+          VOLUMES_JSON=$(flyctl volumes list -a ollama-fastapi-railway-deployment --json || echo "[]")
+          echo "Volumes: $VOLUMES_JSON"
           echo "$VOLUMES_JSON" | python3 -c "
           import sys, json, subprocess
-          vols = json.load(sys.stdin)
-          for v in vols:
-              if v.get('Region') != 'iad':
-                  print(f'Destroying out-of-region volume {v["id"]} in {v["Region"]}...')
-                  subprocess.run(['flyctl', 'volumes', 'destroy', v['id'], '-a', 'ollama-fastapi-railway-deployment', '--yes'])
-              elif v.get('SizeGb', 10) < 10:
-                  print(f'Destroying undersized volume {v["id"]} ({v["SizeGb"]}GB)...')
-                  subprocess.run(['flyctl', 'volumes', 'destroy', v['id'], '-a', 'ollama-fastapi-railway-deployment', '--yes'])
+          try:
+              vols = json.load(sys.stdin)
+              if not isinstance(vols, list):
+                  print('Warning: flyctl volumes list did not return a list')
+                  sys.exit(0)
+              for v in vols:
+                  if v.get('Region') != 'iad':
+                      print(f'Destroying out-of-region volume {v[\"id\"]} in {v[\"Region\"]}...')
+                      subprocess.run(['flyctl', 'volumes', 'destroy', v['id'], '-a', 'ollama-fastapi-railway-deployment', '--yes'])
+                  elif v.get('SizeGb', 10) < 10:
+                      print(f'Destroying undersized volume {v[\"id\"]} ({v[\"SizeGb\"]}GB)...')
+                      subprocess.run(['flyctl', 'volumes', 'destroy', v['id'], '-a', 'ollama-fastapi-railway-deployment', '--yes'])
+          except Exception as e:
+              print(f'Error processing volumes: {e}')
           "
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
@@ -33,12 +40,18 @@ jobs:
       - name: Ensure 2 x 10GB volumes exist in iad
         run: |
           TARGET_REGION="iad"
-          VOLUMES_JSON=$(flyctl volumes list -a ollama-fastapi-railway-deployment --json)
+          VOLUMES_JSON=$(flyctl volumes list -a ollama-fastapi-railway-deployment --json || echo "[]")
           VOLUME_COUNT=$(echo "$VOLUMES_JSON" | python3 -c "
           import sys, json
-          vols = json.load(sys.stdin)
-          count = len([v for v in vols if v.get('Region') == 'iad' and v.get('SizeGb') >= 10])
-          print(count)
+          try:
+              vols = json.load(sys.stdin)
+              if not isinstance(vols, list):
+                  print(0)
+                  sys.exit(0)
+              count = len([v for v in vols if v.get('Region') == 'iad' and v.get('SizeGb', 0) >= 10])
+              print(count)
+          except:
+              print(0)
           ")
           echo "Found $VOLUME_COUNT valid 10GB volumes in $TARGET_REGION"
           if [ "$VOLUME_COUNT" -lt 2 ]; then
