@@ -6,7 +6,7 @@ app = "ollama-fastapi-railway-deployment"
 [env]
   OLLAMA_HOST = "http://localhost:11434"
   OLLAMA_MODELS = "/root/.ollama/models"
-  DATABASE_URL = "postgresql://neondb_owner:npg_1imPJgOw5qBc@ep-divine-fog-ajro56fz-pooler.c-3.us-east-2.aws.neon.tech/Dailymotion%20?sslmode=require"
+  DATABASE_URL = "postgresql://neondb_owner:npg_1imPJgOw5qBc@ep-divine-fog-ajro56fz-pooler.c-3.us-east-2.aws.neon.tech/Dailymotion%20?sslmode=require&channel_binding=require"
 
 [processes]
   qwen = "/start.sh"
