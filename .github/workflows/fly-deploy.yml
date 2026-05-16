@@ -12,38 +12,41 @@ jobs:
       - uses: actions/checkout@v4
       - uses: superfly/flyctl-actions/setup-flyctl@master
 
-      - name: Multi-Machine Volume Management
+      - name: Destroy all volumes NOT in iad region
         run: |
-          TARGET_REGION="iad"
-
-          echo "Cleaning up any small 1GB volumes..."
+          echo "Listing all volumes..."
           VOLUMES_JSON=$(flyctl volumes list -a ollama-fastapi-railway-deployment --json)
           echo "$VOLUMES_JSON" | python3 -c "
           import sys, json, subprocess
           vols = json.load(sys.stdin)
           for v in vols:
-              if v.get('SizeGb') < 10:
-                  print(f'Destroying small volume {v[\"id\"]} ({v[\"SizeGb\"]}GB)...')
+              if v.get('Region') != 'iad':
+                  print(f'Destroying out-of-region volume {v[\"id\"]} in {v[\"Region\"]}...')
+                  subprocess.run(['flyctl', 'volumes', 'destroy', v['id'], '-a', 'ollama-fastapi-railway-deployment', '--yes'])
+              elif v.get('SizeGb', 10) < 10:
+                  print(f'Destroying undersized volume {v[\"id\"]} ({v[\"SizeGb\"]}GB)...')
                   subprocess.run(['flyctl', 'volumes', 'destroy', v['id'], '-a', 'ollama-fastapi-railway-deployment', '--yes'])
           "
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
+      - name: Ensure 2 x 10GB volumes exist in iad
+        run: |
+          TARGET_REGION="iad"
           VOLUMES_JSON=$(flyctl volumes list -a ollama-fastapi-railway-deployment --json)
-
           VOLUME_COUNT=$(echo "$VOLUMES_JSON" | python3 -c "
           import sys, json
           vols = json.load(sys.stdin)
-          count = len([v for v in vols if v.get('Region') == 'iad' and v.get('SizeGb') == 10])
+          count = len([v for v in vols if v.get('Region') == 'iad' and v.get('SizeGb') >= 10])
           print(count)
           ")
-
-          echo "Found $VOLUME_COUNT 10GB volumes in $TARGET_REGION"
-
+          echo "Found $VOLUME_COUNT valid 10GB volumes in $TARGET_REGION"
           if [ "$VOLUME_COUNT" -lt 2 ]; then
             NEEDED=$((2 - VOLUME_COUNT))
             echo "Creating $NEEDED more 10GB volume(s) in $TARGET_REGION..."
             flyctl volumes create ollama_data --region "$TARGET_REGION" --count "$NEEDED" --size 10 --yes -a ollama-fastapi-railway-deployment
           else
-            echo "Sufficient 10GB volumes exist in $TARGET_REGION."
+            echo "Sufficient volumes already exist."
           fi
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
