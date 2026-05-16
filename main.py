@@ -5,6 +5,7 @@ import hashlib
 import httpx
 import asyncio
 import json
+import logging
 from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,6 +15,11 @@ from typing import Optional, List, Dict, Any
 from sqlalchemy import create_engine, Column, String, Integer, BigInteger, Text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.exc import OperationalError
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Ollama API Server",
@@ -33,13 +39,14 @@ app.add_middleware(
 # Database Setup
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
-    raise ValueError("DATABASE_URL environment variable is not set")
+    logger.error("DATABASE_URL environment variable is not set")
+    # Don't raise error here, let the app start so health checks can pass
+    # Endpoints requiring DB will fail gracefully later
 
-engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+engine = None
+SessionLocal = None
 Base = declarative_base()
 
-# Models
 class APIKey(Base):
     __tablename__ = "api_keys"
     id = Column(Integer, primary_key=True, index=True)
@@ -47,13 +54,31 @@ class APIKey(Base):
     name = Column(String(100))
     created_at = Column(BigInteger, default=lambda: int(time.time()))
 
-# Create tables
-Base.metadata.create_all(bind=engine)
+def init_db():
+    global engine, SessionLocal
+    if not DATABASE_URL:
+        return
+    
+    try:
+        engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+        SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+        # Create tables if they don't exist
+        Base.metadata.create_all(bind=engine)
+        logger.info("Database initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize database: {e}")
+
+@app.on_event("startup")
+async def startup_event():
+    # Run DB init in background or during startup but catch errors
+    init_db()
 
 # Security
 security = HTTPBearer()
 
 def get_db():
+    if SessionLocal is None:
+        raise HTTPException(status_code=503, detail="Database not initialized")
     db = SessionLocal()
     try:
         yield db
@@ -63,10 +88,13 @@ def get_db():
 async def verify_api_key(credentials: HTTPAuthorizationCredentials = Depends(security), db = Depends(get_db)):
     key = credentials.credentials
     key_hash = hashlib.sha256(key.encode()).hexdigest()
-    db_key = db.query(APIKey).filter(APIKey.key_hash == key_hash).first()
-    if not db_key:
-        raise HTTPException(status_code=401, detail="Invalid API Key")
-    return db_key
+    try:
+        db_key = db.query(APIKey).filter(APIKey.key_hash == key_hash).first()
+        if not db_key:
+            raise HTTPException(status_code=401, detail="Invalid API Key")
+        return db_key
+    except OperationalError:
+        raise HTTPException(status_code=503, detail="Database connection error")
 
 # Pydantic models for API
 class ChatMessage(BaseModel):
@@ -83,12 +111,21 @@ OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 
 @app.get("/health")
 async def health_check():
+    # Return 200 as long as FastAPI is alive
+    # Include Ollama status in the body
+    ollama_ready = False
     try:
         async with httpx.AsyncClient() as client:
-            resp = await client.get(f"{OLLAMA_HOST}/api/tags")
-            return {"status": "healthy", "ollama": resp.status_code == 200}
+            resp = await client.get(f"{OLLAMA_HOST}/api/tags", timeout=1.0)
+            ollama_ready = (resp.status_code == 200)
     except Exception:
-        return {"status": "starting", "ollama": False}
+        pass
+    
+    return {
+        "status": "healthy",
+        "ollama": ollama_ready,
+        "database": SessionLocal is not None
+    }
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: ChatCompletionRequest, api_key = Depends(verify_api_key)):
