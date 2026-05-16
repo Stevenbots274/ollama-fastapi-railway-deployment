@@ -213,6 +213,41 @@ async def revoke_api_key(revoke_data: APIKeyRevoke, db = Depends(get_db)):
     db.commit()
     return {"message": "API Key revoked successfully"}
 
+@app.get("/v1/models")
+async def list_models(api_key = Depends(verify_api_key)):
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(f"{OLLAMA_HOST}/api/tags")
+        if resp.status_code != 200:
+            return {"object": "list", "data": []}
+        ollama_models = resp.json().get("models", [])
+        data = []
+        for m in ollama_models:
+            data.append({
+                "id": m.get("name"),
+                "object": "model",
+                "created": int(time.time()),
+                "owned_by": "ollama"
+            })
+        return {"object": "list", "data": data}
+
+@app.post("/api/generate")
+async def ollama_generate(request: Dict[str, Any], api_key = Depends(verify_api_key)):
+    async with httpx.AsyncClient(timeout=None) as client:
+        resp = await client.post(f"{OLLAMA_HOST}/api/generate", json=request)
+        return resp.json()
+
+@app.get("/api/models")
+async def ollama_models(api_key = Depends(verify_api_key)):
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(f"{OLLAMA_HOST}/api/tags")
+        return resp.json()
+
+@app.post("/api/pull")
+async def ollama_pull(request: Dict[str, Any], api_key = Depends(verify_api_key)):
+    async with httpx.AsyncClient(timeout=None) as client:
+        resp = await client.post(f"{OLLAMA_HOST}/api/pull", json=request)
+        return resp.json()
+
 @app.get("/UI", response_class=HTMLResponse)
 @app.get("/", response_class=HTMLResponse)
 async def index():
@@ -223,60 +258,98 @@ async def index():
     <title>Ollama API Server</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🤖</text></svg>">
     <style>
-        body { font-family: system-ui, sans-serif; max-width: 800px; margin: 40px auto; padding: 20px; line-height: 1.6; background: #f4f4f9; color: #333; }
-        .card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 20px; }
-        h1, h2, h3 { color: #2c3e50; }
-        code { background: #eee; padding: 2px 5px; border-radius: 4px; font-family: monospace; }
-        .code-block { background: #eef; padding: 15px; border-left: 5px solid #2196f3; margin: 15px 0; overflow-x: auto; font-family: monospace; }
-        .warning { background: #fff3cd; color: #856404; border: 1px solid #ffeeba; padding: 10px; border-radius: 4px; margin: 15px 0; }
-        .endpoint { background: #f8f8f8; padding: 10px; border-radius: 4px; margin-bottom: 5px; display: flex; align-items: center; }
-        .method { background: #28a745; color: white; padding: 3px 8px; border-radius: 3px; margin-right: 10px; font-size: 0.8em; font-weight: bold; }
-        .url { font-weight: bold; color: #0056b3; }
-        .status { display: inline-block; width: 12px; height: 12px; border-radius: 50%; margin-right: 8px; }
-        .online { background: #4caf50; }
-        .offline { background: #f44336; }
-        #chat-box { height: 300px; overflow-y: auto; border: 1px solid #ddd; padding: 10px; margin-bottom: 10px; background: #fafafa; }
-        .message { margin-bottom: 10px; padding: 8px; border-radius: 4px; }
-        .user { background: #e3f2fd; text-align: right; }
-        .assistant { background: #f5f5f5; }
-        input[type="text"], button { padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 1em; }
-        input[type="text"] { width: calc(70% - 22px); margin-right: 10px; }
-        button { background: #2196f3; color: white; border: none; cursor: pointer; width: 25%; }
+        body { font-family: system-ui, sans-serif; max-width: 900px; margin: 40px auto; padding: 20px; line-height: 1.6; background: #f4f4f9; color: #333; }
+        .card { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); margin-bottom: 25px; border: 1px solid #eef; }
+        h1, h2, h3 { color: #2c3e50; margin-top: 0; }
+        code { background: #f8f9fa; padding: 3px 6px; border-radius: 4px; font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 0.9em; color: #e83e8c; }
+        .code-block { background: #1e1e2e; color: #cdd6f4; padding: 20px; border-radius: 8px; margin: 15px 0; overflow-x: auto; font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 0.85em; position: relative; }
+        .warning { background: #fff3cd; color: #856404; border: 1px solid #ffeeba; padding: 15px; border-radius: 8px; margin: 20px 0; display: flex; align-items: center; gap: 10px; }
+        .endpoint { background: #f8f9fa; padding: 12px 15px; border-radius: 6px; margin-bottom: 8px; display: flex; align-items: center; border-left: 4px solid #2196f3; }
+        .method { background: #28a745; color: white; padding: 4px 10px; border-radius: 4px; margin-right: 15px; font-size: 0.75em; font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px; }
+        .url { font-weight: 600; color: #0056b3; font-family: monospace; }
+        .status { display: inline-block; width: 12px; height: 12px; border-radius: 50%; margin-right: 10px; }
+        .online { background: #4caf50; box-shadow: 0 0 8px rgba(76, 175, 80, 0.5); }
+        .offline { background: #f44336; box-shadow: 0 0 8px rgba(244, 67, 54, 0.5); }
+        #chat-box { height: 400px; overflow-y: auto; border: 1px solid #e1e4e8; padding: 20px; margin-bottom: 15px; background: #ffffff; border-radius: 8px; display: flex; flex-direction: column; gap: 12px; }
+        .message { max-width: 85%; padding: 12px 16px; border-radius: 12px; font-size: 0.95em; position: relative; word-wrap: break-word; }
+        .user { background: #007bff; color: white; align-self: flex-end; border-bottom-right-radius: 2px; }
+        .assistant { background: #f1f3f5; color: #212529; align-self: flex-start; border-bottom-left-radius: 2px; border: 1px solid #dee2e6; }
+        .input-group { display: flex; gap: 10px; margin-top: 10px; }
+        input[type="text"] { flex: 1; padding: 12px 15px; border: 2px solid #e1e4e8; border-radius: 8px; font-size: 1em; outline: none; transition: border-color 0.2s; }
+        input[type="text"]:focus { border-color: #2196f3; }
+        button { background: #2196f3; color: white; border: none; padding: 12px 25px; border-radius: 8px; font-weight: 600; cursor: pointer; transition: background 0.2s; }
         button:hover { background: #1976d2; }
-        table { width: 100%; border-collapse: collapse; margin: 15px 0; }
-        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
-        th { background-color: #f2f2f2; }
+        table { width: 100%; border-collapse: collapse; margin: 20px 0; border-radius: 8px; overflow: hidden; }
+        th, td { border: 1px solid #e1e4e8; padding: 12px 15px; text-align: left; }
+        th { background-color: #f8f9fa; font-weight: 600; color: #495057; }
+        .container { display: flex; flex-direction: column; gap: 20px; }
     </style>
 </head>
 <body>
-    <div class="card">
-        <h1>Ollama API Server</h1>
-        <p>Status: <span id="status-dot" class="status offline"></span><span id="status-text">Checking...</span></p>
-        <h3>Quick Test</h3>
-        <div id="chat-box"></div>
-        <input type="text" id="user-input" placeholder="Type a message..." onkeypress="if(event.key==='Enter') sendMessage()">
-        <button onclick="sendMessage()">Send</button>
+    <div class="container">
+        <div class="card">
+            <h1>Ollama API Server</h1>
+            <p>Status: <span id="status-dot" class="status offline"></span><span id="status-text">Checking system status...</span></p>
+            <h3>Interactive Playground</h3>
+            <div id="chat-box"></div>
+            <div class="input-group">
+                <input type="text" id="user-input" placeholder="Ask anything to the LLM..." onkeypress="if(event.key==='Enter') sendMessage()">
+                <button onclick="sendMessage()">Send Message</button>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Authentication</h2>
+            <p>All API requests must include your API key in the <code>Authorization</code> header.</p>
+            <div class="code-block">Authorization: Bearer YOUR_API_KEY</div>
+            <div class="warning">
+                <span>⚠️</span>
+                <span>Keep your API keys secure. They grant direct access to your LLM resources.</span>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Key Management (Admin)</h2>
+            <p style="color:#6c757d;margin-bottom:15px">Manage your access keys using the Master Key in the <code>X-Master-Key</code> header.</p>
+            <div class="endpoint"><span class="method" style="background:#6f42c1">POST</span><span class="url">/admin/keys</span> - Create new API key</div>
+            <div class="code-block">Headers: X-Master-Key: your-master-key<br>Body: {"name": "production-app", "rate_limit": 5000}<br><br>Response: {"api_key": "ollama_xxxxx", "warning": "Save this key now!"}</div>
+            <div class="endpoint"><span class="method" style="background:#17a2b8">GET</span><span class="url">/admin/keys</span> - List active keys</div>
+            <div class="endpoint"><span class="method" style="background:#dc3545">POST</span><span class="url">/admin/keys/revoke</span> - Revoke access</div>
+        </div>
+
+        <div class="card">
+            <h2>OpenAI-Compatible API</h2>
+            <p>Use your favorite OpenAI libraries by pointing the base URL to this server.</p>
+            <h3>Chat Completions</h3>
+            <div class="endpoint"><span class="method">POST</span><span class="url">/v1/chat/completions</span></div>
+            <div class="code-block">curl -X POST <span class="base-url"></span>/v1/chat/completions \<br>  -H "Authorization: Bearer YOUR_API_KEY" \<br>  -H "Content-Type: application/json" \<br>  -d '{<br>    "model": "qwen2.5:0.5b",<br>    "messages": [{"role": "user", "content": "Hello!"}],<br>    "stream": true<br>  }'</div>
+            <h3>List Models</h3>
+            <div class="endpoint"><span class="method" style="background:#17a2b8">GET</span><span class="url">/v1/models</span></div>
+        </div>
+
+        <div class="card">
+            <h2>Ollama Native API</h2>
+            <div class="endpoint"><span class="method">POST</span><span class="url">/api/generate</span></div>
+            <div class="endpoint"><span class="method" style="background:#17a2b8">GET</span><span class="url">/api/models</span></div>
+            <div class="endpoint"><span class="method" style="background:#6f42c1">POST</span><span class="url">/api/pull</span></div>
+        </div>
+
+        <div class="card">
+            <h2>Available Models</h2>
+            <table>
+                <thead>
+                    <tr><th>Model Name</th><th>Size</th><th>Performance</th><th>Best For</th></tr>
+                </thead>
+                <tbody>
+                    <tr><td><code>qwen2.5:0.5b</code></td><td>~300MB</td><td>Ultra Fast</td><td>Lightweight tasks</td></tr>
+                    <tr><td><code>tinyllama:latest</code></td><td>~600MB</td><td>Very Fast</td><td>Quick inference</td></tr>
+                    <tr><td><code>llama3.2:1b</code></td><td>~1.3GB</td><td>Fast</td><td>General reasoning</td></tr>
+                    <tr><td><code>mistral:7b</code></td><td>~4.1GB</td><td>Standard</td><td>High-quality output</td></tr>
+                </tbody>
+            </table>
+        </div>
     </div>
-    <div class="card">
-        <h2>API Usage</h2>
-        <p>All API endpoints require authentication with a Bearer token.</p>
-        <div class="code-block">Authorization: Bearer YOUR_API_KEY</div>
-        <div class="warning">Keep your API keys secret. They grant full access to the LLM API.</div>
-    </div>
-    <div class="card">
-        <h2>Key Management (Master Key Required)</h2>
-        <p style="color:#888;margin-bottom:10px">Use your MASTER_KEY in the X-Master-Key header to manage API keys.</p>
-        <div class="endpoint"><span class="method">POST</span><span class="url">/admin/keys</span> - Create new API key</div>
-        <div class="code-block">Headers: X-Master-Key: your-master-key<br>Body: {"name": "my-app", "rate_limit": 1000}<br><br>Response: {"api_key": "ollama_xxxxx", "warning": "Save this key now!"}</div>
-        <div class="endpoint"><span class="method">GET</span><span class="url">/admin/keys</span> - List all keys</div>
-        <div class="endpoint"><span class="method">POST</span><span class="url">/admin/keys/revoke</span> - Revoke a key</div>
-    </div>
-    <div class="card">
-        <h2>OpenAI-Compatible Endpoints</h2>
-        <h3>Chat Completions</h3>
-        <div class="endpoint"><span class="method">POST</span><span class="url">/v1/chat/completions</span></div>
-        <div class="code-block">curl -X POST <span class="base-url"></span>/v1/chat/completions<br>-H "Authorization: Bearer YOUR_API_KEY"<br>-H "Content-Type: application/json"<br>-d '{"model":"qwen2.5:0.5b","messages":[{"role":"user","content":"Hello!"}]}'</div>
-    </div>
+
     <script>
         document.querySelectorAll(".base-url").forEach(el=>el.textContent=window.location.origin);
         async function checkStatus() {
@@ -285,35 +358,66 @@ async def index():
                 const data = await res.json();
                 const dot = document.getElementById("status-dot");
                 const text = document.getElementById("status-text");
-                if (data.ollama) { dot.className = "status online"; text.textContent = "Ollama Online"; }
-                else { dot.className = "status offline"; text.textContent = "Ollama Starting..."; }
-            } catch (e) { console.error(e); }
+                if (data.ollama) {
+                    dot.className = "status online";
+                    text.textContent = "Ollama Online & Ready";
+                } else {
+                    dot.className = "status offline";
+                    text.textContent = "Ollama Initializing...";
+                }
+            } catch (e) {
+                console.error(e);
+            }
         }
         async function sendMessage() {
             const input = document.getElementById("user-input");
             const text = input.value.trim();
             if (!text) return;
-            const key = prompt("Enter your API Key to test:");
+            
+            const key = prompt("Please enter your API Key to authenticate:");
             if (!key) return;
+
             input.value = "";
             const chatBox = document.getElementById("chat-box");
-            chatBox.innerHTML += `<div class="message user">${text}</div>`;
+            
+            const userDiv = document.createElement("div");
+            userDiv.className = "message user";
+            userDiv.textContent = text;
+            chatBox.appendChild(userDiv);
+            chatBox.scrollTop = chatBox.scrollHeight;
+
             const assistantMsg = document.createElement("div");
             assistantMsg.className = "message assistant";
-            assistantMsg.textContent = "...";
+            assistantMsg.textContent = "Thinking...";
             chatBox.appendChild(assistantMsg);
+
             try {
                 const res = await fetch("/v1/chat/completions", {
                     method: "POST",
-                    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${key}` },
-                    body: JSON.stringify({ model: "qwen2.5:0.5b", messages: [{role: "user", content: text}] })
+                    headers: {
+                        "Content-Type": "application/json",
+                        "Authorization": `Bearer ${key}`
+                    },
+                    body: JSON.stringify({
+                        model: "qwen2.5:0.5b",
+                        messages: [{role: "user", content: text}]
+                    })
                 });
-                if (!res.ok) { const err = await res.json(); throw new Error(err.detail || "Failed to connect"); }
+                
+                if (!res.ok) {
+                    const err = await res.json();
+                    throw new Error(err.detail || "Authentication failed or server error");
+                }
+
                 const data = await res.json();
                 assistantMsg.textContent = data.choices[0].message.content;
-            } catch (e) { assistantMsg.textContent = "Error: " + e.message; assistantMsg.style.color = "#ff6b6b"; }
+            } catch (e) {
+                assistantMsg.textContent = "Error: " + e.message;
+                assistantMsg.style.color = "#dc3545";
+            }
             chatBox.scrollTop = chatBox.scrollHeight;
         }
+        
         checkStatus();
         setInterval(checkStatus, 10000);
     </script>

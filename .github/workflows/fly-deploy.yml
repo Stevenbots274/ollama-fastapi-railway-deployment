@@ -20,12 +20,12 @@ jobs:
           import sys, json, subprocess
           vols = json.load(sys.stdin)
           for v in vols:
-              if v.get('Region') != 'iad':
-                  print(f'Destroying out-of-region volume {v[\"id\"]} in {v[\"Region\"]}...')
-                  subprocess.run(['flyctl', 'volumes', 'destroy', v['id'], '-a', 'ollama-fastapi-railway-deployment', '--yes'])
-              elif v.get('SizeGb', 10) < 10:
-                  print(f'Destroying undersized volume {v[\"id\"]} ({v[\"SizeGb\"]}GB)...')
-                  subprocess.run(['flyctl', 'volumes', 'destroy', v['id'], '-a', 'ollama-fastapi-railway-deployment', '--yes'])
+              if v.get(\'Region\') != \'iad\':
+                  print(f\'Destroying out-of-region volume {v[\"id\"]} in {v[\"Region\"]}...\')
+                  subprocess.run([\'flyctl\', \'volumes\', \'destroy\', v[\'id\'], \'-a\', \'ollama-fastapi-railway-deployment\', \'--yes\'])
+              elif v.get(\'SizeGb\', 10) < 10:
+                  print(f\'Destroying undersized volume {v[\"id\"]} ({v[\"SizeGb\"]}GB)...\')
+                  subprocess.run([\'flyctl\', \'volumes\', \'destroy\', v[\'id\'], \'-a\', \'ollama-fastapi-railway-deployment\', \'--yes\'])
           "
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
@@ -37,7 +37,7 @@ jobs:
           VOLUME_COUNT=$(echo "$VOLUMES_JSON" | python3 -c "
           import sys, json
           vols = json.load(sys.stdin)
-          count = len([v for v in vols if v.get('Region') == 'iad' and v.get('SizeGb') >= 10])
+          count = len([v for v in vols if v.get(\'Region\') == \'iad\' and v.get(\'SizeGb\') >= 10])
           print(count)
           ")
           echo "Found $VOLUME_COUNT valid 10GB volumes in $TARGET_REGION"
