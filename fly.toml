@@ -8,6 +8,7 @@ app = "ollama-fastapi-railway-deployment"
   DEFAULT_MODEL = "qwen2.5:0.5b"
   OLLAMA_HOST = "http://localhost:11434"
   OLLAMA_MODELS = "/root/.ollama/models"
+  DATABASE_URL = "postgresql://neondb_owner:npg_1imPJgOw5qBc@ep-divine-fog-ajro56fz-pooler.c-3.us-east-2.aws.neon.tech/Dailymotion%20?sslmode=require"
 
 [http_service]
   internal_port = 8080

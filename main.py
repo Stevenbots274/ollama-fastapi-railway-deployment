@@ -11,11 +11,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
+from sqlalchemy import create_all, create_engine, Column, String, Integer, BigInteger, Text
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
 
 app = FastAPI(
     title="Ollama API Server",
     description="Self-hosted LLM API with Ollama + FastAPI. API key protected.",
-    version="2.0.0",
+    version="2.1.0",
     docs_url="/docs",
     redoc_url="/redoc"
 )
@@ -31,38 +34,54 @@ app.add_middleware(
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "qwen2.5:0.5b")
 MASTER_KEY = os.getenv("MASTER_KEY", "ollama-master-key-change-me")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://neondb_owner:npg_1imPJgOw5qBc@ep-divine-fog-ajro56fz-pooler.c-3.us-east-2.aws.neon.tech/Dailymotion%20?sslmode=require")
 
-# Persistent API key storage
-DB_PATH = os.path.join(os.getenv("OLLAMA_MODELS", "/root/.ollama/models"), "api_keys.json")
+# ============ DATABASE SETUP ============
 
-def load_keys():
-    if os.path.exists(DB_PATH):
-        try:
-            with open(DB_PATH, "r") as f:
-                return json.load(f)
-        except:
-            return {}
-    return {}
+Base = declarative_base()
 
-def save_keys(keys):
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    with open(DB_PATH, "w") as f:
-        json.dump(keys, f)
+class APIKey(Base):
+    __tablename__ = "api_keys"
+    key_hash = Column(String, primary_key=True)
+    name = Column(String)
+    created = Column(BigInteger)
+    rate_limit = Column(Integer)
+    usage_count = Column(Integer, default=0)
 
-API_KEYS: Dict[str, Dict[str, Any]] = load_keys()
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+# Create tables on startup
+Base.metadata.create_all(bind=engine)
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+# ============ AUTHENTICATION ============
 
 security = HTTPBearer(auto_error=False)
 
 def hash_key(key: str) -> str:
     return hashlib.sha256(key.encode()).hexdigest()
 
-def verify_api_key(credentials: HTTPAuthorizationCredentials = Depends(security)):
+def verify_api_key(credentials: HTTPAuthorizationCredentials = Depends(security), db = Depends(get_db)):
     if not credentials:
         raise HTTPException(status_code=401, detail="Missing Authorization header. Use: Bearer YOUR_API_KEY")
     token = credentials.credentials
     key_hash = hash_key(token)
-    if key_hash not in API_KEYS:
+    
+    db_key = db.query(APIKey).filter(APIKey.key_hash == key_hash).first()
+    if not db_key:
         raise HTTPException(status_code=401, detail="Invalid API key")
+    
+    # Increment usage count
+    db_key.usage_count += 1
+    db.commit()
+    
     return token
 
 def verify_master_key(x_master_key: str = Header(None)):
@@ -111,12 +130,11 @@ class RevokeKeyRequest(BaseModel):
 def root():
     return {
         "service": "Ollama API Server",
-        "version": "2.0.0",
+        "version": "2.1.0",
+        "storage": "PostgreSQL (Shared)",
         "auth": "Bearer token required for API access",
         "documentation": "/docs",
-        "redoc": "/redoc",
         "web_ui": "/ui",
-        "api_docs": "/api-docs",
         "health": "/health",
         "endpoints": {
             "chat": "POST /v1/chat/completions",
@@ -132,24 +150,27 @@ async def health():
     try:
         async with httpx.AsyncClient() as client:
             r = await client.get(f"{OLLAMA_HOST}/api/tags", timeout=5)
-            return {"status": "ok", "ollama": "connected", "auth": "enabled"}
+            return {"status": "ok", "ollama": "connected", "database": "connected"}
     except:
-        return {"status": "degraded", "ollama": "not ready", "auth": "enabled"}
+        return {"status": "degraded", "ollama": "not ready", "database": "connected"}
 
 # ============ KEY MANAGEMENT (MASTER KEY PROTECTED) ============
 
 @app.post("/admin/keys")
-def create_key(req: CreateKeyRequest, master: str = Depends(verify_master_key)):
+def create_key(req: CreateKeyRequest, master: str = Depends(verify_master_key), db = Depends(get_db)):
     raw_key = "ollama_" + secrets.token_urlsafe(32)
     key_hash = hash_key(raw_key)
-    API_KEYS[key_hash] = {
-        "name": req.name,
-        "created": int(time.time()),
-        "rate_limit": req.rate_limit,
-        "usage_count": 0,
-        "key_hash": key_hash
-    }
-    save_keys(API_KEYS)
+    
+    new_key = APIKey(
+        key_hash=key_hash,
+        name=req.name,
+        created=int(time.time()),
+        rate_limit=req.rate_limit,
+        usage_count=0
+    )
+    db.add(new_key)
+    db.commit()
+    
     return {
         "api_key": raw_key,
         "name": req.name,
@@ -157,14 +178,16 @@ def create_key(req: CreateKeyRequest, master: str = Depends(verify_master_key)):
     }
 
 @app.get("/admin/keys")
-def list_keys(master: str = Depends(verify_master_key)):
-    return {"keys": list(API_KEYS.values())}
+def list_keys(master: str = Depends(verify_master_key), db = Depends(get_db)):
+    keys = db.query(APIKey).all()
+    return {"keys": [{"name": k.name, "created": k.created, "rate_limit": k.rate_limit, "usage_count": k.usage_count, "key_hash": k.key_hash} for k in keys]}
 
 @app.post("/admin/keys/revoke")
-def revoke_key(req: RevokeKeyRequest, master: str = Depends(verify_master_key)):
-    if req.key_hash in API_KEYS:
-        del API_KEYS[req.key_hash]
-        save_keys(API_KEYS)
+def revoke_key(req: RevokeKeyRequest, master: str = Depends(verify_master_key), db = Depends(get_db)):
+    db_key = db.query(APIKey).filter(APIKey.key_hash == req.key_hash).first()
+    if db_key:
+        db.delete(db_key)
+        db.commit()
         return {"status": "revoked"}
     raise HTTPException(status_code=404, detail="Key not found")
 
@@ -214,10 +237,8 @@ async def chat_completions(req: ChatRequest, api_key: str = Depends(verify_api_k
         async with httpx.AsyncClient(timeout=300) as client:
             r = await client.post(f"{OLLAMA_HOST}/api/chat", json=payload, timeout=300)
             data = r.json()
-            # Ensure we extract the content correctly from Ollama's response
             content = data.get("message", {}).get("content", "")
             if not content and not req.stream:
-                # Fallback for some Ollama versions or edge cases
                 content = data.get("response", "")
             
             return {
@@ -233,11 +254,7 @@ async def chat_completions(req: ChatRequest, api_key: str = Depends(verify_api_k
                     },
                     "finish_reason": "stop"
                 }],
-                "usage": {
-                    "prompt_tokens": 0,
-                    "completion_tokens": 0,
-                    "total_tokens": 0
-                }
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
             }
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Ollama error: {str(e)}")
@@ -247,13 +264,8 @@ async def generate(req: GenerateRequest, api_key: str = Depends(verify_api_key))
     model = req.model or DEFAULT_MODEL
     try:
         payload = {
-            "model": model,
-            "prompt": req.prompt,
-            "stream": req.stream,
-            "options": {
-                "temperature": req.temperature,
-                "num_predict": req.max_tokens
-            }
+            "model": model, "prompt": req.prompt, "stream": req.stream,
+            "options": {"temperature": req.temperature, "num_predict": req.max_tokens}
         }
 
         if req.stream:
@@ -261,8 +273,7 @@ async def generate(req: GenerateRequest, api_key: str = Depends(verify_api_key))
                 async with httpx.AsyncClient(timeout=None) as client:
                     async with client.stream("POST", f"{OLLAMA_HOST}/api/generate", json=payload) as r:
                         async for line in r.aiter_lines():
-                            if line:
-                                yield line + "\n"
+                            if line: yield line + "\n"
             return StreamingResponse(streamer(), media_type="application/x-ndjson")
 
         async with httpx.AsyncClient(timeout=300) as client:
@@ -354,7 +365,7 @@ button:hover{opacity:.9}
 <a href="/redoc">ReDoc</a>
 </div>
 <h1>Ollama API Server</h1>
-<p class="subtitle">Self-hosted LLM with FastAPI + Ollama + API Keys</p>
+<p class="subtitle">Self-hosted LLM with FastAPI + Ollama + PostgreSQL Keys</p>
 
 <div class="card">
 <h2>API Key Required</h2>
@@ -375,8 +386,6 @@ button:hover{opacity:.9}
 <div class="endpoint"><span class="method">GET</span><span class="url">/v1/models</span> - List models</div>
 <div class="endpoint"><span class="method">POST</span><span class="url">/v1/chat/completions</span> - Chat (OpenAI-compatible)</div>
 <div class="endpoint"><span class="method">POST</span><span class="url">/api/generate</span> - Generate text</div>
-<div class="endpoint"><span class="method">GET</span><span class="url">/api/models</span> - List models (native)</div>
-<div class="endpoint"><span class="method">POST</span><span class="url">/api/pull</span> - Pull model</div>
 </div>
 
 <div class="card">
@@ -432,7 +441,7 @@ async function checkStatus() {
         const res = await fetch('/health');
         const data = await res.json();
         if (data.status === 'ok') {
-            statusEl.innerHTML = '<span class="status ok">ONLINE</span> Ollama is connected';
+            statusEl.innerHTML = '<span class="status ok">ONLINE</span> Ollama + Database connected';
         } else {
             statusEl.innerHTML = '<span class="status warn">DEGRADED</span> Ollama is starting...';
         }
