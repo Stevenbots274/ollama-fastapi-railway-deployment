@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-export OLLAMA_NUM_PARALLEL=1
+export OLLAMA_NUM_PARALLEL=4
 export OLLAMA_MAX_LOADED_MODELS=1
 
 case "$FLY_PROCESS_GROUP" in
@@ -20,7 +20,7 @@ echo "Starting Ollama server in background (Process Group: ${FLY_PROCESS_GROUP:-
 ollama serve &
 
 echo "Starting FastAPI on port 8080 immediately..."
-python3 -m uvicorn main:app --host 0.0.0.0 --port 8080 --workers 1 &
+python3 -m uvicorn main:app --host 0.0.0.0 --port 8080 --workers 4 &
 FASTAPI_PID=$!
 
 echo "Waiting for Ollama to be ready in background..."

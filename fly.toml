@@ -31,9 +31,9 @@ primary_region = "iad"
     path = "/health"
 
 [[vm]]
-  memory = "2048"
+  memory = "4096"
   cpu_kind = "shared"
-  cpus = 1
+  cpus = 4
 
 [[mounts]]
   source = "ollama_data"
