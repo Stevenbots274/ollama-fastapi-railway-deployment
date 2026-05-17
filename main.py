@@ -71,6 +71,19 @@ def init_db():
 @app.on_event("startup")
 async def startup_event():
     init_db()
+    asyncio.create_task(keep_warm_background())
+
+async def keep_warm_background():
+    """Background task that pings Ollama every 4 minutes to prevent cold starts."""
+    await asyncio.sleep(60)  # Wait 1 minute after startup before first ping
+    while True:
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                await client.get(f"{OLLAMA_HOST}/api/tags")
+                logger.info("Keep-warm ping sent to Ollama.")
+        except Exception as e:
+            logger.warning(f"Keep-warm ping failed: {e}")
+        await asyncio.sleep(240)  # Ping every 4 minutes
 
 def get_db():
     if SessionLocal is None:
@@ -143,6 +156,34 @@ async def health():
     except:
         pass
     return {"status": "degraded", "ollama": "not ready", "auth": "enabled"}
+
+@app.get("/ping")
+async def ping():
+    """Lightweight keep-alive endpoint for external pingers. No auth required."""
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            r = await client.get(f"{OLLAMA_HOST}/api/tags")
+            if r.status_code == 200:
+                return {"status": "alive", "timestamp": int(time.time())}
+    except:
+        pass
+    return {"status": "starting", "timestamp": int(time.time())}
+
+@app.post("/warmup")
+async def warmup():
+    """Send a tiny inference to keep the model loaded in RAM. No auth required."""
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            payload = {
+                "model": DEFAULT_MODEL,
+                "messages": [{"role": "user", "content": "Hi"}],
+                "stream": False,
+                "options": {"num_predict": 1}
+            }
+            r = await client.post(f"{OLLAMA_HOST}/api/chat", json=payload)
+            return {"status": "warm", "model": DEFAULT_MODEL, "timestamp": int(time.time())}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
 
 @app.get("/", response_class=HTMLResponse)
 @app.get("/ui", response_class=HTMLResponse)
