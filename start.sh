@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-export OLLAMA_NUM_PARALLEL=4
+export OLLAMA_NUM_PARALLEL=2
 export OLLAMA_MAX_LOADED_MODELS=1
 
 case "$FLY_PROCESS_GROUP" in

@@ -175,6 +175,7 @@ async def list_models(api_key: str = Depends(verify_api_key)):
 @app.post("/v1/chat/completions")
 async def chat_completions(req: ChatRequest, api_key: str = Depends(verify_api_key)):
     model = req.model or DEFAULT_MODEL
+    logger.info(f"Chat request for model: {model}")
     try:
         payload = {
             "model": model,
@@ -189,30 +190,44 @@ async def chat_completions(req: ChatRequest, api_key: str = Depends(verify_api_k
         if req.stream:
             async def streamer():
                 async with httpx.AsyncClient(timeout=None) as client:
-                    async with client.stream("POST", f"{OLLAMA_HOST}/api/chat", json=payload) as response:
-                        async for line in response.aiter_lines():
-                            if line:
-                                try:
-                                    data = json.loads(line)
-                                    chunk = {
-                                        "id": f"chatcmpl-{int(time.time())}",
-                                        "object": "chat.completion.chunk",
-                                        "created": int(time.time()),
-                                        "model": model,
-                                        "choices": [{
-                                            "index": 0,
-                                            "delta": {"content": data.get("message", {}).get("content", "")},
-                                            "finish_reason": "stop" if data.get("done") else None
-                                        }]
-                                    }
-                                    yield f"data: {json.dumps(chunk)}\n\n"
-                                except:
-                                    continue
-                        yield "data: [DONE]\n\n"
+                    try:
+                        async with client.stream("POST", f"{OLLAMA_HOST}/api/chat", json=payload) as response:
+                            if response.status_code != 200:
+                                error_text = await response.aread()
+                                logger.error(f"Ollama streaming error: {response.status_code} - {error_text.decode()}")
+                                yield f"data: {json.dumps({'error': 'Upstream error'})}\n\n"
+                                return
+                                
+                            async for line in response.aiter_lines():
+                                if line:
+                                    try:
+                                        data = json.loads(line)
+                                        chunk = {
+                                            "id": f"chatcmpl-{int(time.time())}",
+                                            "object": "chat.completion.chunk",
+                                            "created": int(time.time()),
+                                            "model": model,
+                                            "choices": [{
+                                                "index": 0,
+                                                "delta": {"content": data.get("message", {}).get("content", "")},
+                                                "finish_reason": "stop" if data.get("done") else None
+                                            }]
+                                        }
+                                        yield f"data: {json.dumps(chunk)}\n\n"
+                                    except Exception as e:
+                                        logger.error(f"Error parsing Ollama chunk: {e}")
+                                        continue
+                            yield "data: [DONE]\n\n"
+                    except Exception as e:
+                        logger.error(f"Streaming connection error: {e}")
+                        yield f"data: {json.dumps({'error': str(e)})}\n\n"
             return StreamingResponse(streamer(), media_type="text/event-stream")
         else:
             async with httpx.AsyncClient(timeout=120) as client:
                 r = await client.post(f"{OLLAMA_HOST}/api/chat", json=payload)
+                if r.status_code != 200:
+                    logger.error(f"Ollama error: {r.status_code} - {r.text}")
+                    raise HTTPException(status_code=r.status_code, detail=f"Ollama error: {r.text}")
                 data = r.json()
                 return {
                     "id": f"chatcmpl-{int(time.time())}",
@@ -228,8 +243,11 @@ async def chat_completions(req: ChatRequest, api_key: str = Depends(verify_api_k
                         "finish_reason": "stop"
                     }]
                 }
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=503, detail=f"Ollama error: {str(e)}")
+        logger.error(f"Chat completion error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
 
 @app.post("/api/generate")
 async def generate(req: GenerateRequest, api_key: str = Depends(verify_api_key)):
