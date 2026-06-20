@@ -287,8 +287,12 @@ async def chat_completions(req: ChatRequest, api_key: str = Depends(verify_api_k
     use_azure_for_this = USE_AZURE and (req.model == AZURE_OPENAI_DEPLOYMENT_NAME or not req.model)
     
     if use_azure_for_this:
+        if not azure_client:
+            logger.error("Azure client is not initialized.")
+            raise HTTPException(status_code=500, detail="Azure client not initialized. Check your environment variables.")
         try:
             messages = [{"role": m.role, "content": m.content} for m in req.messages]
+            logger.info(f"Sending request to Azure OpenAI: {AZURE_OPENAI_DEPLOYMENT_NAME}")
             
             if req.stream:
                 response = azure_client.chat.completions.create(
@@ -300,10 +304,14 @@ async def chat_completions(req: ChatRequest, api_key: str = Depends(verify_api_k
                 )
                 
                 async def azure_streamer():
-                    for chunk in response:
-                        if chunk.choices:
-                            yield f"data: {json.dumps(chunk.model_dump())}\n\n"
-                    yield "data: [DONE]\n\n"
+                    try:
+                        for chunk in response:
+                            if chunk.choices:
+                                yield f"data: {json.dumps(chunk.model_dump())}\n\n"
+                        yield "data: [DONE]\n\n"
+                    except Exception as e:
+                        logger.error(f"Azure streaming error: {e}")
+                        yield f"data: {json.dumps({'error': str(e)})}\n\n"
                 return StreamingResponse(azure_streamer(), media_type="text/event-stream")
             else:
                 response = azure_client.chat.completions.create(
