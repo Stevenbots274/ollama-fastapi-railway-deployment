@@ -46,22 +46,29 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 # Use AZURE_OPENAI_MODEL as the base endpoint if it looks like a URL
 AZURE_OPENAI_MODEL_ENV = os.getenv("AZURE_OPENAI_MODEL", "").strip()
 AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT", "").strip()
-AZURE_OPENAI_KEY = os.getenv("AZURE_OPENAI_KEY", "").strip()
+# Support both AZURE_OPENAI_KEY and AZURE_OPENAI_API_KEY
+AZURE_OPENAI_KEY = (os.getenv("AZURE_OPENAI_API_KEY") or os.getenv("AZURE_OPENAI_KEY") or "").strip()
 AZURE_OPENAI_DEPLOYMENT_NAME = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o").strip()
 AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-15-preview").strip()
 
-# Smart URL handling: If AZURE_OPENAI_MODEL is a URL, it's likely the resource endpoint
-if AZURE_OPENAI_MODEL_ENV.startswith("http"):
-    if "/openai/v1" in AZURE_OPENAI_MODEL_ENV:
-        AZURE_OPENAI_ENDPOINT = AZURE_OPENAI_MODEL_ENV.split("/openai/v1")[0]
-    else:
-        AZURE_OPENAI_ENDPOINT = AZURE_OPENAI_MODEL_ENV
+# Smart URL handling: Extract the base resource endpoint
+def clean_azure_url(url: str) -> str:
+    if not url or not url.startswith("http"):
+        return url
+    # If it's the project URL, we should look for the resource URL in other vars
+    # But if it's the only one we have, we'll try to use it
+    if "/openai/v1" in url:
+        return url.split("/openai/v1")[0]
+    if "/api/projects" in url:
+        # This is a project URL, the SDK might need the .openai.azure.com one
+        return url
+    return url
 
-# If AZURE_OPENAI_ENDPOINT is the project URL, we still need the resource URL
-# But the Azure SDK usually wants the .openai.azure.com one
-if "services.ai.azure.com" in AZURE_OPENAI_ENDPOINT and not AZURE_OPENAI_MODEL_ENV.startswith("http"):
-    # Fallback or warning if needed, but we'll try to use what's given
-    pass
+# Prioritize the resource URL from AZURE_OPENAI_MODEL_ENV if it's a URL
+if AZURE_OPENAI_MODEL_ENV.startswith("http"):
+    AZURE_OPENAI_ENDPOINT = clean_azure_url(AZURE_OPENAI_MODEL_ENV)
+else:
+    AZURE_OPENAI_ENDPOINT = clean_azure_url(AZURE_OPENAI_ENDPOINT)
 
 USE_AZURE = bool(AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_KEY)
 
