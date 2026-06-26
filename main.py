@@ -46,12 +46,16 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 AZURE_OPENAI_MODEL_ENV = os.getenv("AZURE_OPENAI_MODEL", "").strip()
 AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT", "").strip()
 AZURE_OPENAI_KEY = (os.getenv("AZURE_OPENAI_API_KEY") or os.getenv("AZURE_OPENAI_KEY") or "").strip()
-AZURE_OPENAI_DEPLOYMENT_NAME = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o").strip()
+AZURE_OPENAI_DEPLOYMENTS = os.getenv("AZURE_OPENAI_DEPLOYMENTS", "gpt-4o,gpt-4o-mini").strip().split(",")
+AZURE_OPENAI_DEPLOYMENTS = [d.strip() for d in AZURE_OPENAI_DEPLOYMENTS if d.strip()]
 AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-15-preview").strip()
 
-# Extract the clean endpoint
-if AZURE_OPENAI_MODEL_ENV.startswith("http") and "/openai/v1" in AZURE_OPENAI_MODEL_ENV:
-    AZURE_OPENAI_ENDPOINT = AZURE_OPENAI_MODEL_ENV.split("/openai/v1")[0]
+# Extract the clean endpoint from AZURE_OPENAI_MODEL if provided
+if AZURE_OPENAI_MODEL_ENV.startswith("http"):
+    if "/openai/v1" in AZURE_OPENAI_MODEL_ENV:
+        AZURE_OPENAI_ENDPOINT = AZURE_OPENAI_MODEL_ENV.split("/openai/v1")[0]
+    elif "/openai" in AZURE_OPENAI_MODEL_ENV:
+        AZURE_OPENAI_ENDPOINT = AZURE_OPENAI_MODEL_ENV.split("/openai")[0]
 
 USE_AZURE = bool(AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_KEY)
 
@@ -240,14 +244,15 @@ async def api_docs():
 async def list_models(api_key: str = Depends(verify_api_key)):
     models = []
     
-    # Add Azure model if configured
-    if USE_AZURE and AZURE_OPENAI_DEPLOYMENT_NAME:
-        models.append({
-            "id": AZURE_OPENAI_DEPLOYMENT_NAME,
-            "object": "model",
-            "created": int(time.time()),
-            "owned_by": "azure"
-        })
+    # Add Azure models if configured
+    if USE_AZURE:
+        for deployment in AZURE_OPENAI_DEPLOYMENTS:
+            models.append({
+                "id": deployment,
+                "object": "model",
+                "created": int(time.time()),
+                "owned_by": "azure"
+            })
         
     # Add Ollama models
     try:
@@ -274,7 +279,8 @@ async def chat_completions(req: ChatRequest, api_key: str = Depends(verify_api_k
     model = req.model or DEFAULT_MODEL
     
     # Check if we should use Azure
-    use_azure_for_this = USE_AZURE and (req.model == AZURE_OPENAI_DEPLOYMENT_NAME or not req.model)
+    requested_model = req.model or DEFAULT_MODEL
+    use_azure_for_this = USE_AZURE and requested_model in AZURE_OPENAI_DEPLOYMENTS
     
     if use_azure_for_this:
         if not azure_client:
@@ -282,11 +288,11 @@ async def chat_completions(req: ChatRequest, api_key: str = Depends(verify_api_k
             raise HTTPException(status_code=500, detail="Azure client not initialized. Check your environment variables.")
         try:
             messages = [{"role": m.role, "content": m.content} for m in req.messages]
-            logger.info(f"Sending request to Azure OpenAI: {AZURE_OPENAI_DEPLOYMENT_NAME}")
+            logger.info(f"Sending request to Azure OpenAI: {requested_model}")
             
             if req.stream:
                 response = azure_client.chat.completions.create(
-                    model=AZURE_OPENAI_DEPLOYMENT_NAME,
+                    model=requested_model,
                     messages=messages,
                     temperature=req.temperature,
                     max_tokens=req.max_tokens,
