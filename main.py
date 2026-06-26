@@ -19,7 +19,7 @@ from sqlalchemy.orm import sessionmaker, Session
 
 import bcrypt
 import secrets
-import httpx # Import httpx here
+import httpx
 
 # Conditional import for AzureOpenAI
 USE_AZURE = os.getenv("AZURE_OPENAI_API_KEY") and os.getenv("AZURE_OPENAI_ENDPOINT")
@@ -127,8 +127,6 @@ def verify_api_key(api_key: str, db: Session = Depends(get_db)) -> bool:
             # Handle cases where hashed_key might be malformed or not a bcrypt hash
             continue
     return False
-
-
 
 def verify_master_key(credentials: HTTPAuthorizationCredentials = Depends(security)) -> bool:
     if not MASTER_KEY:
@@ -301,7 +299,7 @@ async def chat_completions(req: ChatRequest, request: Request, db: Session = Dep
                     yield "data: [DONE]\n\n"
                 except Exception as e:
                     print(f"Azure streaming error: {e}")
-                    yield f"data: {json.dumps({"error": str(e)})}\n\n"
+                    yield f"data: {json.dumps({'error': str(e)})}\n\n"
             return StreamingResponse(azure_streaming_generator(), media_type="text/event-stream")
         else:
             response = azure_client.chat.completions.create(
@@ -341,7 +339,7 @@ async def chat_completions(req: ChatRequest, request: Request, db: Session = Dep
                     yield "data: [DONE]\n\n"
                 except Exception as e:
                     print(f"Ollama streaming error: {e}")
-                    yield f"data: {json.dumps({"error": str(e)})}\n\n"
+                    yield f"data: {json.dumps({'error': str(e)})}\n\n"
             return StreamingResponse(ollama_streaming_generator(), media_type="text/event-stream")
         else:
             async with httpx.AsyncClient() as client:
@@ -379,7 +377,7 @@ async def generate_completion(req: GenerateRequest, request: Request, db: Sessio
                 yield "data: [DONE]\n\n"
             except Exception as e:
                 print(f"Ollama generate streaming error: {e}")
-                yield f"data: {json.dumps({"error": str(e)})}\n\n"
+                yield f"data: {json.dumps({'error': str(e)})}\n\n"
         return StreamingResponse(ollama_generate_streaming_generator(), media_type="text/event-stream")
     else:
         async with httpx.AsyncClient() as client:
@@ -387,7 +385,7 @@ async def generate_completion(req: GenerateRequest, request: Request, db: Sessio
             response.raise_for_status()
             return response.json()
 
-@app.get("/admin/keys", tags=["Admin"], response_model=List[Dict[str, str]])
+@app.get("/admin/keys", tags=["Admin"], response_model=List[Dict[str, Any]])
 async def get_api_keys(master_key_valid: bool = Depends(verify_master_key), db: Session = Depends(get_db)):
     keys = db.query(APIKey).all()
     return [{
@@ -408,175 +406,104 @@ async def create_api_key(req: CreateKeyRequest, master_key_valid: bool = Depends
 
 @app.delete("/admin/keys", tags=["Admin"])
 async def revoke_api_key(req: RevokeKeyRequest, master_key_valid: bool = Depends(verify_master_key), db: Session = Depends(get_db)):
-    hashed_key_to_revoke = hash_key(req.key)
-    db_key = db.query(APIKey).filter(APIKey.hashed_key == hashed_key_to_revoke).first()
-    if db_key:
-        db.delete(db_key)
+    # Note: This logic assumes we can find the key by hashing the provided key.
+    # Since bcrypt hashes are unique per call (due to salt), we'd need to verify against each stored hash.
+    target_key = None
+    for stored_key_obj in db.query(APIKey).all():
+        try:
+            if bcrypt.checkpw(req.key.encode("utf-8"), stored_key_obj.hashed_key.encode("utf-8")):
+                target_key = stored_key_obj
+                break
+        except Exception:
+            continue
+    
+    if target_key:
+        db.delete(target_key)
         db.commit()
         return {"message": "API key revoked successfully"}
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="API key not found")
 
-
 HTML_CONTENT = """
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Ollama & Azure OpenAI Proxy</title>
+    <title>Ollama API Server</title>
     <style>
-        body { font-family: sans-serif; margin: 2em; line-height: 1.6; color: #333; background-color: #f4f4f4; }
-        h1 { color: #0056b3; }
-        code { background-color: #e0e0e0; padding: 0.2em 0.4em; border-radius: 3px; }
-        pre { background-color: #e9e9e9; padding: 1em; border-radius: 5px; overflow-x: auto; }
-        .container { max-width: 800px; margin: auto; background: #fff; padding: 2em; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-        .note { background-color: #fff3cd; border-left: 5px solid #ffeeba; padding: 1em; margin-bottom: 1em; border-radius: 4px; }
-        a { color: #0056b3; text-decoration: none; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; max-width: 800px; margin: 40px auto; padding: 0 20px; color: #333; }
+        pre { background: #f4f4f4; padding: 15px; border-radius: 5px; overflow-x: auto; }
+        code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; font-size: 0.9em; }
+        .status { display: inline-block; padding: 4px 8px; border-radius: 4px; font-size: 0.8em; font-weight: bold; }
+        .status-ok { background: #e6ffed; color: #22863a; }
+        h1 { border-bottom: 1px solid #eaecef; padding-bottom: 0.3em; }
+        a { color: #0366d6; text-decoration: none; }
         a:hover { text-decoration: underline; }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1>Ollama & Azure OpenAI Proxy</h1>
-        <p class="note">
-            This is a FastAPI application acting as a proxy for both local Ollama models and Azure OpenAI services.
-            It provides a unified API endpoint compatible with OpenAI's chat completions API.
-        </p>
+    <h1>Ollama API Server <span class="status status-ok">Active</span></h1>
+    <p>This is a high-performance wrapper for Ollama, providing OpenAI-compatible endpoints and API key authentication.</p>
+    
+    <h3>Available Endpoints</h3>
+    <ul>
+        <li><code>GET /health</code> - Server health check</li>
+        <li><code>GET /v1/models</code> - List available models</li>
+        <li><code>POST /v1/chat/completions</code> - OpenAI-compatible chat</li>
+        <li><code>POST /api/generate</code> - Ollama-native generation</li>
+        <li><code>GET /api-docs</code> - API Documentation</li>
+    </ul>
 
-        <h2>API Endpoints</h2>
-        <ul>
-            <li><strong><code>POST /v1/chat/completions</code></strong>: Unified chat completions endpoint. Automatically routes to Ollama or Azure based on the requested model.</li>
-            <li><strong><code>GET /v1/models</code></strong>: Lists available Ollama and Azure OpenAI models.</li>
-            <li><strong><code>POST /api/generate</code></strong>: Ollama-specific text generation endpoint.</li>
-            <li><strong><code>GET /health</code></strong>: Checks the health of the proxy and Ollama service.</li>
-            <li><strong><code>GET /ping</code></strong>: Basic connectivity check.</li>
-            <li><strong><code>GET /warmup</code></strong>: Shows which model is being kept warm.</li>
-            <li><strong><code>GET /admin/keys</code></strong>: (Admin) Lists API keys. Requires Master Key.</li>
-            <li><strong><code>POST /admin/keys</code></strong>: (Admin) Creates a new API key. Requires Master Key.</li>
-            <li><strong><code>DELETE /admin/keys</code></strong>: (Admin) Revokes an API key. Requires Master Key.</li>
-        </ul>
+    <h3>Quick Start</h3>
+    <pre><code>curl https://ollama-fastapi-railway-deployment-qst2ba.fly.dev/v1/chat/completions \\
+  -H "Authorization: Bearer YOUR_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "tinyllama:latest",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'</code></pre>
 
-        <h2>Authentication</h2>
-        <p>
-            Access to <code>/v1/chat/completions</code>, <code>/v1/models</code>, and <code>/api/generate</code> requires an API key.
-            Include it in the <code>Authorization</code> header as a Bearer token: <code>Authorization: Bearer YOUR_API_KEY</code>.
-        </p>
-        <p>
-            Admin endpoints (<code>/admin/keys</code>) require a Master Key, also in the <code>Authorization</code> header.
-        </p>
-
-        <h2>Ollama Models</h2>
-        <p>
-            The application is configured to serve the following Ollama models:
-            <ul>
-                <li><code>qwen2.5:0.5b</code></li>
-                <li><code>tinyllama:latest</code></li>
-                <li><code>llama3.2:1b</code></li>
-            </ul>
-            These models are pulled and kept warm by separate Fly.io machines/processes.
-        </p>
-
-        <h2>Azure OpenAI Models</h2>
-        <p>
-            If configured, the application also proxies requests to Azure OpenAI for the following deployments:
-            <ul>
-                <li><code>gpt-4o-mini</code></li>
-                <li><code>gpt-35-turbo</code></li>
-                <li><code>gpt-4</code></li>
-            </ul>
-            The specific models available depend on your Azure OpenAI deployments.
-        </p>
-
-        <h2>Usage Example (Python with <code>openai</code> library)</h2>
-        <p>Replace <code>YOUR_API_KEY</code> and adjust the <code>base_url</code> and <code>model</code> as needed.</p>
-        <pre><code>
-from openai import OpenAI
-
-client = OpenAI(
-    base_url="http://localhost:8080/v1", # Or your deployed Fly.io URL
-    api_key="YOUR_API_KEY",
-)
-
-# Chat Completion (Ollama or Azure)
-chat_completion = client.chat.completions.create(
-    model="tinyllama:latest", # or "gpt-4o-mini"
-    messages=[
-        {"role": "user", "content": "Hello world!"},
-    ],
-    stream=False
-)
-print(chat_completion.choices[0].message.content)
-
-# Streaming Chat Completion
-stream = client.chat.completions.create(
-    model="gpt-4o-mini",
-    messages=[
-        {"role": "user", "content": "Tell me a long story."},
-    ],
-    stream=True
-)
-for chunk in stream:
-    if chunk.choices[0].delta.content is not None:
-        print(chunk.choices[0].delta.content, end="")
-print()
-
-# Multimodal Chat Completion (with image)
-chat_completion_multimodal = client.chat.completions.create(
-    model="llava:latest", # Example multimodal Ollama model
-    messages=[
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": "What is in this image?"},
-                {"type": "image_url", "image_url": {"url": "https://example.com/image.jpg"}},
-            ],
-        },
-    ],
-    stream=False
-)
-print(chat_completion_multimodal.choices[0].message.content)
-        </code></pre>
-
-        <h2>Source Code</h2>
-        <p>
-            The full source code for this project is available on GitHub:
-            <a href="https://github.com/Phoenix1185/ollama-fastapi-railway-deployment">Phoenix1185/ollama-fastapi-railway-deployment</a>
-        </p>
-    </div>
+    <p><a href="/docs">Swagger UI</a> | <a href="/api-docs">API Guide</a></p>
 </body>
 </html>
 """
 
 API_DOCS_CONTENT = """
-<!doctype html>
-<html lang="en">
+<!DOCTYPE html>
+<html>
 <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
-    <title>API Documentation</title>
-    <!-- Embed swagger-ui -->
-    <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.17.14/swagger-ui-bundle.js"></script>
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.17.14/swagger-ui.css">
+    <title>API Documentation - Ollama Server</title>
     <style>
-        body { margin: 0; }
+        body { font-family: -apple-system, sans-serif; line-height: 1.6; max-width: 900px; margin: 40px auto; padding: 0 20px; color: #24292e; }
+        h1, h2, h3 { border-bottom: 1px solid #eaecef; padding-bottom: 0.3em; }
+        pre { background: #f6f8fa; padding: 16px; border-radius: 6px; overflow: auto; }
+        code { font-family: monospace; background: rgba(27,31,35,0.05); padding: 0.2em 0.4em; border-radius: 3px; }
+        table { border-collapse: collapse; width: 100%; margin: 20px 0; }
+        th, td { border: 1px solid #dfe2e5; padding: 8px 12px; text-align: left; }
+        th { background: #f6f8fa; }
     </style>
 </head>
 <body>
-    <div id="swagger-ui"></div>
-    <script>
-        SwaggerUIBundle({
-            url: "/openapi.json",
-            dom_id: "#swagger-ui",
-            presets: [
-                SwaggerUIBundle.presets.apis,
-                SwaggerUIBundle.OAS3_COLLECTION_FORMAT,
-            ],
-            layout: "BaseLayout",
-            deepLinking: true,
-            showExtensions: true,
-            showCommonExtensions: true
-        })
-    </script>
+    <h1>API Documentation</h1>
+    
+    <h2>Authentication</h2>
+    <p>All API requests must include a Bearer token in the <code>Authorization</code> header:</p>
+    <pre><code>Authorization: Bearer ollama_...</code></pre>
+
+    <h2>Chat Completions (OpenAI Compatible)</h2>
+    <p><code>POST /v1/chat/completions</code></p>
+    <table>
+        <tr><th>Field</th><th>Type</th><th>Description</th></tr>
+        <tr><td>model</td><td>string</td><td>Model name (e.g., tinyllama:latest)</td></tr>
+        <tr><td>messages</td><td>array</td><td>List of message objects</td></tr>
+        <tr><td>stream</td><td>boolean</td><td>Enable streaming (SSE)</td></tr>
+    </table>
+
+    <h2>Admin API</h2>
+    <p>Admin endpoints require the <code>X-Master-Key</code> header.</p>
+    <ul>
+        <li><code>GET /admin/keys</code> - List all keys</li>
+        <li><code>POST /admin/keys</code> - Create a new key</li>
+        <li><code>DELETE /admin/keys/{hash}</code> - Revoke a key</li>
+    </ul>
 </body>
 </html>
 """
