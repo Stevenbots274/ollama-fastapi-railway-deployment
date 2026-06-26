@@ -286,7 +286,7 @@ async def chat_completions(req: ChatRequest, request: Request, db: Session = Dep
         if req.stream:
             async def azure_streaming_generator():
                 try:
-                    stream = azure_client.chat.completions.create(
+                    stream = await azure_client.chat.completions.create(
                         model=requested_model,
                         messages=azure_messages,
                         temperature=req.temperature,
@@ -302,7 +302,7 @@ async def chat_completions(req: ChatRequest, request: Request, db: Session = Dep
                     yield f"data: {json.dumps({'error': str(e)})}\n\n"
             return StreamingResponse(azure_streaming_generator(), media_type="text/event-stream")
         else:
-            response = azure_client.chat.completions.create(
+            response = await azure_client.chat.completions.create(
                 model=requested_model,
                 messages=azure_messages,
                 temperature=req.temperature,
