@@ -1,4 +1,4 @@
-app = "ollama-fastapi-railway-deployment"
+app = "ollama-fastapi-railway-deployment-qst2ba"
 primary_region = "iad"
 
 [build]
@@ -31,7 +31,7 @@ primary_region = "iad"
     path = "/health"
 
 [[vm]]
-  memory = "4096"
+  memory = "4gb"
   cpu_kind = "shared"
   cpus = 4
 
