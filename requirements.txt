@@ -8,3 +8,4 @@ sqlalchemy
 psycopg2-binary
 databases[postgresql]
 openai
+bcrypt
