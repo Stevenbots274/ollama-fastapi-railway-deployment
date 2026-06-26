@@ -7,3 +7,4 @@ python-multipart>=0.0.9
 sqlalchemy
 psycopg2-binary
 databases[postgresql]
+openai

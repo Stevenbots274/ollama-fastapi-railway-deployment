@@ -43,32 +43,15 @@ MASTER_KEY = os.getenv("MASTER_KEY", "ollama-master-key-change-me")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 # Azure OpenAI Configuration
-# Use AZURE_OPENAI_MODEL as the base endpoint if it looks like a URL
 AZURE_OPENAI_MODEL_ENV = os.getenv("AZURE_OPENAI_MODEL", "").strip()
 AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT", "").strip()
-# Support both AZURE_OPENAI_KEY and AZURE_OPENAI_API_KEY
 AZURE_OPENAI_KEY = (os.getenv("AZURE_OPENAI_API_KEY") or os.getenv("AZURE_OPENAI_KEY") or "").strip()
 AZURE_OPENAI_DEPLOYMENT_NAME = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o").strip()
 AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-15-preview").strip()
 
-# Smart URL handling: Extract the base resource endpoint
-def clean_azure_url(url: str) -> str:
-    if not url or not url.startswith("http"):
-        return url
-    # If it's the project URL, we should look for the resource URL in other vars
-    # But if it's the only one we have, we'll try to use it
-    if "/openai/v1" in url:
-        return url.split("/openai/v1")[0]
-    if "/api/projects" in url:
-        # This is a project URL, the SDK might need the .openai.azure.com one
-        return url
-    return url
-
-# Prioritize the resource URL from AZURE_OPENAI_MODEL_ENV if it's a URL
-if AZURE_OPENAI_MODEL_ENV.startswith("http"):
-    AZURE_OPENAI_ENDPOINT = clean_azure_url(AZURE_OPENAI_MODEL_ENV)
-else:
-    AZURE_OPENAI_ENDPOINT = clean_azure_url(AZURE_OPENAI_ENDPOINT)
+# Extract the clean endpoint
+if AZURE_OPENAI_MODEL_ENV.startswith("http") and "/openai/v1" in AZURE_OPENAI_MODEL_ENV:
+    AZURE_OPENAI_ENDPOINT = AZURE_OPENAI_MODEL_ENV.split("/openai/v1")[0]
 
 USE_AZURE = bool(AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_KEY)
 
@@ -80,7 +63,7 @@ if USE_AZURE:
             api_version=AZURE_OPENAI_API_VERSION,
             azure_endpoint=AZURE_OPENAI_ENDPOINT
         )
-        logger.info("Azure OpenAI client initialized.")
+        logger.info(f"Azure OpenAI client initialized with endpoint: {AZURE_OPENAI_ENDPOINT}")
     except Exception as e:
         logger.error(f"Failed to initialize Azure client: {e}")
         azure_client = None
