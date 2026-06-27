@@ -9,21 +9,20 @@ primary_region = "iad"
   OLLAMA_MODELS = "/root/.ollama/models"
   OLLAMA_KEEP_ALIVE = "-1"
   OLLAMA_NOPRUNE = "1"
-  DATABASE_URL = "postgresql://neondb_owner:npg_1imPJgOw5qBc@ep-divine-fog-ajro56fz-pooler.c-3.us-east-2.aws.neon.tech/neondb?sslmode=require"
+  DATABASE_URL = "postgresql://neondb_owner:npg_sNEqonT0xkM3@ep-square-hall-ap9xbqqe-pooler.c-7.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
+  AZURE_OPENAI_DEPLOYMENTS = "gpt-4o-mini,gpt-35-turbo,gpt-4"
 
 [processes]
   qwen = "/start.sh"
   tinyllama = "/start.sh"
-  llama3 = "/start.sh"
-  phi3 = "/start.sh"
 
 [http_service]
   internal_port = 8080
   force_https = true
   auto_stop_machines = false
   auto_start_machines = true
-  min_machines_running = 4
-  processes = ["qwen", "tinyllama", "llama3", "phi3"]
+  min_machines_running = 2
+  processes = ["qwen", "tinyllama"]
 
   [[http_service.checks]]
     interval = "15s"
@@ -40,4 +39,4 @@ primary_region = "iad"
 [[mounts]]
   source = "ollama_data"
   destination = "/root/.ollama"
-  processes = ["qwen", "tinyllama", "llama3", "phi3"]
+  processes = ["qwen", "tinyllama"]
