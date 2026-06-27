@@ -402,15 +402,23 @@ async def list_models(token: str = Depends(verify_api_key)):
             "parent": None
         })
     
-    # Add Ollama models
-    for m in ollama_models:
+    # Add Ollama models - Ensure all configured models are listed
+    configured_ollama_models = ["qwen2.5:0.5b", "tinyllama:latest", "llama3:latest"]
+    
+    # Get names of models actually present in Ollama
+    present_model_names = [m.get("name") for m in ollama_models if m.get("name")]
+    
+    # Combine configured models and any other models found in Ollama
+    all_ollama_models = list(set(configured_ollama_models + present_model_names))
+    
+    for model_name in all_ollama_models:
         data.append({
-            "id": m.get("name"),
+            "id": model_name,
             "object": "model",
             "created": int(time.time()),
             "owned_by": "ollama",
             "permission": [],
-            "root": m.get("name"),
+            "root": model_name,
             "parent": None
         })
     
