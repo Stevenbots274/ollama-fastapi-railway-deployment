@@ -15,14 +15,15 @@ primary_region = "iad"
 [processes]
   qwen = "/start.sh"
   tinyllama = "/start.sh"
+  llama3 = "/start.sh"
 
 [http_service]
   internal_port = 8080
   force_https = true
   auto_stop_machines = false
   auto_start_machines = true
-  min_machines_running = 2
-  processes = ["qwen", "tinyllama"]
+  min_machines_running = 3
+  processes = ["qwen", "tinyllama", "llama3"]
 
   [[http_service.checks]]
     interval = "15s"
@@ -39,4 +40,4 @@ primary_region = "iad"
 [[mounts]]
   source = "ollama_data"
   destination = "/root/.ollama"
-  processes = ["qwen", "tinyllama"]
+  processes = ["qwen", "tinyllama", "llama3"]

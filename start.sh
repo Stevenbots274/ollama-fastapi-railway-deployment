@@ -13,6 +13,9 @@ case "$FLY_PROCESS_GROUP" in
     "tinyllama")
         MODEL_TO_PULL="tinyllama:latest"
         ;;
+    "llama3")
+        MODEL_TO_PULL="llama3:latest"
+        ;;
     *)
         MODEL_TO_PULL="qwen2.5:0.5b"
         ;;
