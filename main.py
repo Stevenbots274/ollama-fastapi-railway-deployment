@@ -16,6 +16,7 @@ from sqlalchemy import create_engine, Column, String, Integer, BigInteger, Text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.exc import OperationalError
+from openai import AsyncAzureOpenAI, AzureOpenAI
 
 # Logging setup
 logging.basicConfig(level=logging.INFO)
@@ -24,7 +25,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="Ollama API Server",
     description="Self-hosted LLM API with Ollama + FastAPI. API key protected.",
-    version="2.0.0",
+    version="2.1.0",
     docs_url="/docs",
     redoc_url="/redoc"
 )
@@ -43,152 +44,84 @@ MASTER_KEY = os.getenv("MASTER_KEY", "ollama-master-key-change-me")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 # =============================================================================
-# AZURE OPENAI CONFIGURATION - FIXED
+# AZURE OPENAI CONFIGURATION
 # =============================================================================
-# Azure OpenAI requires DEPLOYMENT NAMES, not model names.
-# A deployment name is what YOU named it when deploying in Azure portal.
-# Example: You deploy "gpt-4o" and name the deployment "my-gpt4o" -> use "my-gpt4o"
-
 AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT", "").strip().rstrip("/")
 AZURE_OPENAI_KEY = (os.getenv("AZURE_OPENAI_API_KEY") or os.getenv("AZURE_OPENAI_KEY") or "").strip()
 AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-15-preview").strip()
 
-# DEPLOYMENT NAMES (not model names!) - comma separated
-# These must match the exact deployment names in your Azure OpenAI resource
 AZURE_DEPLOYMENTS_STR = os.getenv("AZURE_OPENAI_DEPLOYMENTS", "gpt-4o-mini,gpt-35-turbo,gpt-4").strip()
 AZURE_OPENAI_DEPLOYMENTS = []
 if AZURE_DEPLOYMENTS_STR:
     AZURE_OPENAI_DEPLOYMENTS = [d.strip() for d in AZURE_DEPLOYMENTS_STR.split(",") if d.strip()]
 
-# Legacy support: AZURE_OPENAI_MODEL might contain endpoint or deployment info
-AZURE_OPENAI_MODEL_ENV = os.getenv("AZURE_OPENAI_MODEL", "").strip()
-if AZURE_OPENAI_MODEL_ENV:
-    # If it looks like a URL, extract endpoint from it
-    if AZURE_OPENAI_MODEL_ENV.startswith("http"):
-        if "/openai/v1" in AZURE_OPENAI_MODEL_ENV:
-            AZURE_OPENAI_ENDPOINT = AZURE_OPENAI_MODEL_ENV.split("/openai/v1")[0].rstrip("/")
-        elif "/openai" in AZURE_OPENAI_MODEL_ENV:
-            AZURE_OPENAI_ENDPOINT = AZURE_OPENAI_MODEL_ENV.split("/openai")[0].rstrip("/")
-    # If it doesn't look like a URL and no deployments are set, treat it as a deployment name
-    elif not AZURE_OPENAI_DEPLOYMENTS and not AZURE_OPENAI_MODEL_ENV.startswith("gpt-"):
-        AZURE_OPENAI_DEPLOYMENTS = [AZURE_OPENAI_MODEL_ENV]
-
-# Known embedding/vision-only model patterns to exclude from chat
-EMBEDDING_PATTERNS = [
-    "embedding", "embed", "text-embedding",
-    "davinci-embed", "ada-embed",
-]
-VISION_ONLY_PATTERNS = [
-    "gpt-image", "dall-e", "image-generation",
-]
+EMBEDDING_PATTERNS = ["embedding", "embed", "text-embedding", "davinci-embed", "ada-embed"]
+VISION_ONLY_PATTERNS = ["gpt-image", "dall-e", "image-generation"]
 
 def is_chat_model(deployment_name: str) -> bool:
-    """Check if a deployment name suggests it's a chat model (not embedding/vision)."""
     name_lower = deployment_name.lower()
-    for pattern in EMBEDDING_PATTERNS:
-        if pattern in name_lower:
-            return False
-    for pattern in VISION_ONLY_PATTERNS:
+    for pattern in EMBEDDING_PATTERNS + VISION_ONLY_PATTERNS:
         if pattern in name_lower:
             return False
     return True
 
 def is_embedding_model(deployment_name: str) -> bool:
-    """Check if a deployment name suggests it's an embedding model."""
     name_lower = deployment_name.lower()
     for pattern in EMBEDDING_PATTERNS:
         if pattern in name_lower:
             return True
     return False
 
-# Validate Azure configuration
 USE_AZURE = False
-azure_client = None
-azure_chat_deployments = []       # Validated chat-capable deployments
-azure_embedding_deployments = []  # Validated embedding-capable deployments
-azure_deployment_map = {}         # Maps deployment name -> model info
+azure_async_client = None
+azure_chat_deployments = []
+azure_embedding_deployments = []
 
 if AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_KEY:
     try:
-        from openai import AzureOpenAI
-        azure_client = AzureOpenAI(
+        # Sync client for startup validation only
+        sync_client = AzureOpenAI(
             api_key=AZURE_OPENAI_KEY,
             api_version=AZURE_OPENAI_API_VERSION,
             azure_endpoint=AZURE_OPENAI_ENDPOINT
         )
+        
+        validated_chat = []
+        validated_embed = []
 
-        # Try to validate deployments by fetching available models from Azure
-        try:
-            validated_chat = []
-            validated_embed = []
+        for dep_name in AZURE_OPENAI_DEPLOYMENTS:
+            is_chat = is_chat_model(dep_name)
+            is_embed = is_embedding_model(dep_name)
 
-            for dep_name in AZURE_OPENAI_DEPLOYMENTS:
-                # Skip embedding/vision models for chat validation
-                is_chat = is_chat_model(dep_name)
-                is_embed = is_embedding_model(dep_name)
+            try:
+                if is_embed:
+                    sync_client.embeddings.create(model=dep_name, input=["test"])
+                    validated_embed.append(dep_name)
+                    logger.info(f"Azure embedding deployment validated: {dep_name}")
+                elif is_chat:
+                    sync_client.chat.completions.create(
+                        model=dep_name,
+                        messages=[{"role": "user", "content": "hi"}],
+                        max_tokens=1
+                    )
+                    validated_chat.append(dep_name)
+                    logger.info(f"Azure chat deployment validated: {dep_name}")
+            except Exception as e:
+                logger.warning(f"Azure deployment test failed for {dep_name}: {e}")
 
-                if not is_chat and not is_embed:
-                    logger.info(f"Azure deployment '{dep_name}' appears to be vision-only. Skipping chat validation.")
-                    continue
-
-                try:
-                    if is_embed:
-                        # Test embedding with a tiny request
-                        test_resp = azure_client.embeddings.create(
-                            model=dep_name,
-                            input=["test"]
-                        )
-                        validated_embed.append(dep_name)
-                        azure_deployment_map[dep_name] = {"status": "active", "type": "embedding"}
-                        logger.info(f"Azure embedding deployment validated: {dep_name}")
-                    else:
-                        # Test chat with a tiny request
-                        test_resp = azure_client.chat.completions.create(
-                            model=dep_name,
-                            messages=[{"role": "user", "content": "hi"}],
-                            max_tokens=1
-                        )
-                        validated_chat.append(dep_name)
-                        azure_deployment_map[dep_name] = {"status": "active", "type": "chat"}
-                        logger.info(f"Azure chat deployment validated: {dep_name}")
-
-                except Exception as test_e:
-                    error_str = str(test_e).lower()
-                    if "deploymentnotfound" in error_str or "does not exist" in error_str:
-                        logger.warning(f"Azure deployment NOT FOUND (will skip): {dep_name}")
-                    elif "rate limit" in error_str or "quota" in error_str:
-                        logger.warning(f"Azure deployment rate limited (will skip): {dep_name}")
-                    elif "not supported" in error_str or "capability" in error_str:
-                        # Might be embedding model tested as chat or vice versa
-                        if is_embed:
-                            logger.warning(f"Azure deployment '{dep_name}' embedding test failed: {test_e}")
-                        else:
-                            logger.warning(f"Azure deployment '{dep_name}' might be embedding/vision only. Skipping chat.")
-                    else:
-                        logger.warning(f"Azure deployment test failed for {dep_name}: {test_e}")
-
+        if validated_chat or validated_embed:
+            USE_AZURE = True
             azure_chat_deployments = validated_chat
             azure_embedding_deployments = validated_embed
-            AZURE_OPENAI_DEPLOYMENTS = validated_chat + validated_embed
-
-            if validated_chat or validated_embed:
-                USE_AZURE = True
-                logger.info(f"Azure OpenAI ready. Chat: {validated_chat}, Embeddings: {validated_embed}")
-            else:
-                logger.warning("No valid Azure deployments found. Azure will be disabled.")
-                azure_client = None
-        except Exception as e:
-            logger.error(f"Azure deployment validation failed: {e}")
-            azure_client = None
-
-    except ImportError:
-        logger.error("openai package not installed. Azure OpenAI disabled.")
-        azure_client = None
+            # Async client for actual endpoint handling
+            azure_async_client = AsyncAzureOpenAI(
+                api_key=AZURE_OPENAI_KEY,
+                api_version=AZURE_OPENAI_API_VERSION,
+                azure_endpoint=AZURE_OPENAI_ENDPOINT
+            )
+            logger.info(f"Azure OpenAI ready. Chat: {validated_chat}, Embeddings: {validated_embed}")
     except Exception as e:
         logger.error(f"Failed to initialize Azure client: {e}")
-        azure_client = None
-else:
-    logger.info("Azure OpenAI not configured (missing endpoint or key)")
 
 # =============================================================================
 # DATABASE SETUP
@@ -224,7 +157,6 @@ async def startup_event():
     asyncio.create_task(keep_warm_background())
 
 async def keep_warm_background():
-    """Aggressive background task that pings Ollama every 2 minutes with actual inference."""
     await asyncio.sleep(30)
     while True:
         try:
@@ -262,11 +194,8 @@ def verify_api_key(credentials: HTTPAuthorizationCredentials = Depends(security)
     if not credentials:
         raise HTTPException(status_code=401, detail="Missing Authorization header. Use: Bearer YOUR_API_KEY")
     token = credentials.credentials
-
-    # Allow Master Key for all endpoints
     if token == MASTER_KEY:
         return token
-
     key_hash = hash_key(token)
     key_record = db.query(APIKey).filter(APIKey.key_hash == key_hash).first()
     if not key_record:
@@ -315,6 +244,92 @@ class RevokeKeyRequest(BaseModel):
     key_hash: str
 
 # =============================================================================
+# HELPER FUNCTIONS
+# =============================================================================
+def messages_to_prompt(messages: List[ChatMessage]) -> str:
+    prompt_parts = []
+    for msg in messages:
+        prompt_parts.append(f"{msg.role.capitalize()}: {msg.content}")
+    prompt_parts.append("Assistant:")
+    return "\n\n".join(prompt_parts)
+
+async def ollama_chat_generate(model: str, messages: List[ChatMessage], stream: bool, temperature: float, max_tokens: int):
+    payload = {
+        "model": model,
+        "messages": [{"role": m.role, "content": m.content} for m in messages],
+        "stream": stream,
+        "options": {"temperature": temperature, "num_predict": max_tokens}
+    }
+
+    if stream:
+        async def generator():
+            async with httpx.AsyncClient(timeout=None) as client:
+                async with client.stream("POST", f"{OLLAMA_HOST}/api/chat", json=payload) as response:
+                    if response.status_code != 200:
+                        error_text = await response.aread()
+                        yield f"data: {json.dumps({'error': error_text.decode()})}\n\n"
+                        yield "data: [DONE]\n\n"
+                        return
+                    
+                    async for line in response.aiter_lines():
+                        if not line: continue
+                        try:
+                            data = json.loads(line)
+                            chunk = {
+                                "id": f"ollama-{int(time.time())}",
+                                "object": "chat.completion.chunk",
+                                "created": int(time.time()),
+                                "model": model,
+                                "choices": [{
+                                    "index": 0,
+                                    "delta": {"content": data.get("message", {}).get("content", "")},
+                                    "finish_reason": data.get("done_reason") if data.get("done") else None
+                                }]
+                            }
+                            yield f"data: {json.dumps(chunk)}\n\n"
+                            if data.get("done"):
+                                yield "data: [DONE]\n\n"
+                        except: continue
+        return generator()
+    else:
+        async with httpx.AsyncClient(timeout=120) as client:
+            r = await client.post(f"{OLLAMA_HOST}/api/chat", json=payload)
+            if r.status_code != 200:
+                # Fallback to /api/generate
+                prompt = messages_to_prompt(messages)
+                gen_payload = {
+                    "model": model,
+                    "prompt": prompt,
+                    "stream": False,
+                    "options": {"temperature": temperature, "num_predict": max_tokens}
+                }
+                r = await client.post(f"{OLLAMA_HOST}/api/generate", json=gen_payload)
+                if r.status_code != 200:
+                    raise HTTPException(status_code=r.status_code, detail=r.text)
+                gen_data = r.json()
+                content = gen_data.get("response", "")
+                prompt_tokens = 0
+                completion_tokens = gen_data.get("eval_count", 0)
+            else:
+                ollama_data = r.json()
+                content = ollama_data.get("message", {}).get("content", "")
+                prompt_tokens = ollama_data.get("prompt_eval_count", 0)
+                completion_tokens = ollama_data.get("eval_count", 0)
+            
+            return {
+                "id": f"ollama-{int(time.time())}",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": model,
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": "stop"}],
+                "usage": {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": prompt_tokens + completion_tokens
+                }
+            }
+
+# =============================================================================
 # ENDPOINTS
 # =============================================================================
 @app.get("/health")
@@ -331,8 +346,7 @@ async def health():
                     "azure_chat_deployments": azure_chat_deployments,
                     "azure_embedding_deployments": azure_embedding_deployments
                 }
-    except:
-        pass
+    except: pass
     return {
         "status": "degraded",
         "ollama": "not ready",
@@ -349,8 +363,7 @@ async def ping():
             r = await client.get(f"{OLLAMA_HOST}/api/tags")
             if r.status_code == 200:
                 return {"status": "alive", "timestamp": int(time.time()), "azure": USE_AZURE}
-    except:
-        pass
+    except: pass
     return {"status": "starting", "timestamp": int(time.time()), "azure": USE_AZURE}
 
 @app.post("/warmup")
@@ -363,7 +376,7 @@ async def warmup():
                 "stream": False,
                 "options": {"num_predict": 1}
             }
-            r = await client.post(f"{OLLAMA_HOST}/api/chat", json=payload)
+            await client.post(f"{OLLAMA_HOST}/api/chat", json=payload)
             return {"status": "warm", "model": DEFAULT_MODEL, "timestamp": int(time.time())}
     except Exception as e:
         return {"status": "error", "detail": str(e)}
@@ -379,276 +392,167 @@ async def api_docs():
     return API_DOCS_CONTENT
 
 @app.get("/v1/models")
-async def list_models(token: str = Depends(verify_api_key)):
-    ollama_models = []
+async def v1_models(token: str = Depends(verify_api_key)):
+    models = []
+    # Add Azure chat models
+    if USE_AZURE:
+        for deployment in azure_chat_deployments:
+            models.append({"id": deployment, "object": "model", "created": int(time.time()), "owned_by": "azure-openai"})
+    
+    # Add Ollama models
+    configured_ollama_models = ["qwen2.5:0.5b", "tinyllama:latest", "llama3:latest"]
+    present_model_names = []
     try:
         async with httpx.AsyncClient() as client:
-            r = await client.get(f"{OLLAMA_HOST}/api/tags")
+            r = await client.get(f"{OLLAMA_HOST}/api/tags", timeout=5)
             if r.status_code == 200:
-                ollama_models = r.json().get("models", [])
-    except:
-        pass
+                data = r.json()
+                present_model_names = [m.get("name") for m in data.get("models", []) if m.get("name")]
+    except Exception as e:
+        logger.error(f"Ollama tags error: {e}")
 
-    data = []
-    # Add Azure deployments
-    for dep in AZURE_OPENAI_DEPLOYMENTS:
-        data.append({
-            "id": dep,
-            "object": "model",
-            "created": int(time.time()),
-            "owned_by": "azure-openai",
-            "permission": [],
-            "root": dep,
-            "parent": None
-        })
-    
-    # Add Ollama models - Ensure all configured models are listed
-    configured_ollama_models = ["qwen2.5:0.5b", "tinyllama:latest", "llama3:latest"]
-    
-    # Get names of models actually present in Ollama
-    present_model_names = [m.get("name") for m in ollama_models if m.get("name")]
-    
-    # Combine configured models and any other models found in Ollama
     all_ollama_models = list(set(configured_ollama_models + present_model_names))
-    
     for model_name in all_ollama_models:
-        data.append({
-            "id": model_name,
-            "object": "model",
-            "created": int(time.time()),
-            "owned_by": "ollama",
-            "permission": [],
-            "root": model_name,
-            "parent": None
-        })
+        models.append({"id": model_name, "object": "model", "created": int(time.time()), "owned_by": "ollama"})
     
-    return {"object": "list", "data": data}
+    return {"object": "list", "data": models}
 
 @app.post("/v1/chat/completions")
-async def chat_completions(request: ChatRequest, token: str = Depends(verify_api_key)):
-    model = request.model or DEFAULT_MODEL
+async def chat_completions(req: ChatRequest, api_key: str = Depends(verify_api_key)):
+    model = req.model or DEFAULT_MODEL
     
-    # --- AZURE ROUTING ---
-    if USE_AZURE and model in AZURE_OPENAI_DEPLOYMENTS:
+    if USE_AZURE and model in azure_chat_deployments:
         try:
-            logger.info(f"Routing request to Azure OpenAI deployment: {model}")
-            
-            # Format messages for Azure
-            azure_messages = [{"role": m.role, "content": m.content} for m in request.messages]
-            
-            if request.stream:
-                async def azure_stream_generator():
-                    try:
-                        from openai import AsyncAzureOpenAI
-                        async_azure_client = AsyncAzureOpenAI(
-                            api_key=AZURE_OPENAI_KEY,
-                            api_version=AZURE_OPENAI_API_VERSION,
-                            azure_endpoint=AZURE_OPENAI_ENDPOINT
-                        )
-                        response = await async_azure_client.chat.completions.create(
-                            model=model,
-                            messages=azure_messages,
-                            temperature=request.temperature,
-                            max_tokens=request.max_tokens,
-                            stream=True
-                        )
-                        async for chunk in response:
-                            if chunk.choices and len(chunk.choices) > 0:
-                                chunk_dict = {
-                                    "id": chunk.id,
-                                    "object": "chat.completion.chunk",
-                                    "created": chunk.created,
-                                    "model": chunk.model,
-                                    "choices": [
-                                        {
-                                            "index": c.index,
-                                            "delta": {"content": c.delta.content} if c.delta.content else {},
-                                            "finish_reason": c.finish_reason
-                                        } for c in chunk.choices
-                                    ]
-                                }
-                                yield f"data: {json.dumps(chunk_dict)}\n\n"
-                        yield "data: [DONE]\n\n"
-                    except Exception as stream_e:
-                        logger.error(f"Azure streaming error: {stream_e}")
-                        error_msg = {"error": {"message": str(stream_e), "type": "azure_error"}}
-                        yield f"data: {json.dumps(error_msg)}\n\n"
-                        yield "data: [DONE]\n\n"
-
-                return StreamingResponse(azure_stream_generator(), media_type="text/event-stream")
-            else:
-                response = azure_client.chat.completions.create(
+            messages = [{"role": m.role, "content": m.content} for m in req.messages]
+            if req.stream:
+                response = await azure_async_client.chat.completions.create(
                     model=model,
-                    messages=azure_messages,
-                    temperature=request.temperature,
-                    max_tokens=request.max_tokens,
+                    messages=messages,
+                    temperature=req.temperature,
+                    max_tokens=req.max_tokens,
+                    stream=True
+                )
+                async def azure_streamer():
+                    try:
+                        async for chunk in response:
+                            if chunk.choices:
+                                yield f"data: {json.dumps(chunk.model_dump())}\n\n"
+                        yield "data: [DONE]\n\n"
+                    except Exception as e:
+                        logger.error(f"Azure streaming error: {e}")
+                        yield f"data: {json.dumps({'error': str(e)})}\n\n"
+                        yield "data: [DONE]\n\n"
+                return StreamingResponse(azure_streamer(), media_type="text/event-stream")
+            else:
+                response = await azure_async_client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    temperature=req.temperature,
+                    max_tokens=req.max_tokens,
                     stream=False
                 )
                 return response.model_dump()
         except Exception as e:
-            logger.error(f"Azure OpenAI failed for {model}: {e}. Falling back to Ollama.")
-            # If Azure fails, fall through to Ollama if the model exists there
+            logger.error(f"Azure OpenAI error: {e}. Falling back to Ollama.")
+
+    # Ollama path
+    if req.stream:
+        gen = await ollama_chat_generate(model, req.messages, True, req.temperature, req.max_tokens)
+        return StreamingResponse(gen, media_type="text/event-stream")
+    else:
+        result = await ollama_chat_generate(model, req.messages, False, req.temperature, req.max_tokens)
+        return result
+
+@app.post("/v1/embeddings")
+async def create_embeddings(req: EmbeddingRequest, api_key: str = Depends(verify_api_key)):
+    model = req.model or (azure_embedding_deployments[0] if azure_embedding_deployments else DEFAULT_MODEL)
     
-    # --- OLLAMA ROUTING ---
-    async def ollama_stream_generator():
+    if USE_AZURE and model in azure_embedding_deployments:
+        try:
+            response = await azure_async_client.embeddings.create(model=model, input=req.input)
+            return response.model_dump()
+        except Exception as e:
+            logger.error(f"Azure embedding error: {e}")
+
+    # Ollama fallback
+    try:
         async with httpx.AsyncClient(timeout=120) as client:
-            payload = {
+            r = await client.post(f"{OLLAMA_HOST}/api/embed", json={"model": model, "input": req.input})
+            if r.status_code != 200:
+                raise HTTPException(status_code=r.status_code, detail=f"Ollama error: {r.text}")
+            data = r.json()
+            embeddings = [{"object": "embedding", "embedding": emb, "index": i} for i, emb in enumerate(data.get("embeddings", []))]
+            return {
+                "object": "list",
+                "data": embeddings,
                 "model": model,
-                "messages": [{"role": m.role, "content": m.content} for m in request.messages],
-                "stream": True,
-                "options": {
-                    "temperature": request.temperature,
-                    "num_predict": request.max_tokens
-                }
+                "usage": {"prompt_tokens": 0, "total_tokens": 0}
             }
-            async with client.stream("POST", f"{OLLAMA_HOST}/api/chat", json=payload) as response:
-                if response.status_code != 200:
-                    error_detail = await response.aread()
-                    yield f"data: {json.dumps({'error': error_detail.decode()})}\n\n"
-                    yield "data: [DONE]\n\n"
-                    return
-
-                async for line in response.aiter_lines():
-                    if not line: continue
-                    try:
-                        data = json.loads(line)
-                        chunk = {
-                            "id": f"ollama-{int(time.time())}",
-                            "object": "chat.completion.chunk",
-                            "created": int(time.time()),
-                            "model": model,
-                            "choices": [{
-                                "index": 0,
-                                "delta": {"content": data.get("message", {}).get("content", "")},
-                                "finish_reason": data.get("done_reason") if data.get("done") else None
-                            }]
-                        }
-                        yield f"data: {json.dumps(chunk)}\n\n"
-                        if data.get("done"):
-                            yield "data: [DONE]\n\n"
-                    except:
-                        continue
-
-    if request.stream:
-        return StreamingResponse(ollama_stream_generator(), media_type="text/event-stream")
-    
-    async with httpx.AsyncClient(timeout=120) as client:
-        payload = {
-            "model": model,
-            "messages": [{"role": m.role, "content": m.content} for m in request.messages],
-            "stream": False,
-            "options": {
-                "temperature": request.temperature,
-                "num_predict": request.max_tokens
-            }
-        }
-        r = await client.post(f"{OLLAMA_HOST}/api/chat", json=payload)
-        if r.status_code != 200:
-            raise HTTPException(status_code=r.status_code, detail=r.text)
-        
-        ollama_data = r.json()
-        return {
-            "id": f"ollama-{int(time.time())}",
-            "object": "chat.completion",
-            "created": int(time.time()),
-            "model": model,
-            "choices": [{
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": ollama_data.get("message", {}).get("content", "")
-                },
-                "finish_reason": "stop"
-            }],
-            "usage": {
-                "prompt_tokens": ollama_data.get("prompt_eval_count", 0),
-                "completion_tokens": ollama_data.get("eval_count", 0),
-                "total_tokens": ollama_data.get("prompt_eval_count", 0) + ollama_data.get("eval_count", 0)
-            }
-        }
+    except Exception as e:
+        logger.error(f"Embedding error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/generate")
-async def generate(request: GenerateRequest, token: str = Depends(verify_api_key)):
-    model = request.model or DEFAULT_MODEL
-    
-    async def stream_generator():
+async def generate(req: GenerateRequest, api_key: str = Depends(verify_api_key)):
+    model = req.model or DEFAULT_MODEL
+    payload = {
+        "model": model,
+        "prompt": req.prompt,
+        "stream": req.stream,
+        "options": {"temperature": req.temperature, "num_predict": req.max_tokens}
+    }
+    if req.stream:
+        async def streamer():
+            async with httpx.AsyncClient(timeout=None) as client:
+                async with client.stream("POST", f"{OLLAMA_HOST}/api/generate", json=payload) as response:
+                    async for line in response.aiter_lines():
+                        if line: yield line + "\n"
+        return StreamingResponse(streamer(), media_type="application/x-ndjson")
+    else:
         async with httpx.AsyncClient(timeout=120) as client:
-            payload = {
-                "model": model,
-                "prompt": request.prompt,
-                "stream": True,
-                "options": {
-                    "temperature": request.temperature,
-                    "num_predict": request.max_tokens
-                }
-            }
-            async with client.stream("POST", f"{OLLAMA_HOST}/api/generate", json=payload) as response:
-                async for line in response.aiter_lines():
-                    if line: yield line + "\n"
-
-    if request.stream:
-        return StreamingResponse(stream_generator(), media_type="application/x-ndjson")
-    
-    async with httpx.AsyncClient(timeout=120) as client:
-        payload = {
-            "model": model,
-            "prompt": request.prompt,
-            "stream": False,
-            "options": {
-                "temperature": request.temperature,
-                "num_predict": request.max_tokens
-            }
-        }
-        r = await client.post(f"{OLLAMA_HOST}/api/generate", json=payload)
-        return r.json()
+            r = await client.post(f"{OLLAMA_HOST}/api/generate", json=payload)
+            return r.json()
 
 @app.get("/api/models")
-async def api_models(token: str = Depends(verify_api_key)):
+async def ollama_models_list(api_key: str = Depends(verify_api_key)):
     async with httpx.AsyncClient() as client:
         r = await client.get(f"{OLLAMA_HOST}/api/tags")
         return r.json()
 
 @app.post("/api/pull")
-async def pull_model(request: PullModelRequest, token: str = Depends(verify_api_key)):
-    async def stream_generator():
-        async with httpx.AsyncClient(timeout=600) as client:
-            async with client.stream("POST", f"{OLLAMA_HOST}/api/pull", json={"name": request.name, "stream": True}) as response:
+async def pull_model(req: PullModelRequest, api_key: str = Depends(verify_api_key)):
+    async def streamer():
+        async with httpx.AsyncClient(timeout=None) as client:
+            async with client.stream("POST", f"{OLLAMA_HOST}/api/pull", json={"name": req.name, "stream": True}) as response:
                 async for line in response.aiter_lines():
                     if line: yield line + "\n"
-    return StreamingResponse(stream_generator(), media_type="application/x-ndjson")
+    return StreamingResponse(streamer(), media_type="application/x-ndjson")
 
 # =============================================================================
-# ADMIN - API KEY MANAGEMENT
+# ADMIN
 # =============================================================================
 @app.post("/admin/keys")
-async def create_key(request: CreateKeyRequest, master_key: str = Depends(verify_master_key), db = Depends(get_db)):
-    new_key = f"ollama_{secrets.token_urlsafe(32)}"
-    key_hash = hash_key(new_key)
-    
-    db_key = APIKey(
-        key_hash=key_hash,
-        name=request.name,
-        created_at=int(time.time())
-    )
-    db.add(db_key)
+async def create_key(req: CreateKeyRequest, master: str = Depends(verify_master_key), db = Depends(get_db)):
+    raw_key = "ollama_" + secrets.token_urlsafe(32)
+    key_hash = hash_key(raw_key)
+    new_key = APIKey(key_hash=key_hash, name=req.name, created_at=int(time.time()))
+    db.add(new_key)
     db.commit()
-    
-    return {"key": new_key, "name": request.name, "key_hash": key_hash}
+    return {"key": raw_key, "name": req.name, "key_hash": key_hash}
 
 @app.get("/admin/keys")
-async def list_keys(master_key: str = Depends(verify_master_key), db = Depends(get_db)):
+async def list_keys(master: str = Depends(verify_master_key), db = Depends(get_db)):
     keys = db.query(APIKey).all()
     return [{"name": k.name, "key_hash": k.key_hash, "created_at": k.created_at} for k in keys]
 
 @app.post("/admin/keys/revoke")
-async def revoke_key(request: RevokeKeyRequest, master_key: str = Depends(verify_master_key), db = Depends(get_db)):
-    key_record = db.query(APIKey).filter(APIKey.key_hash == request.key_hash).first()
-    if not key_record:
-        raise HTTPException(status_code=404, detail="Key not found")
-    
-    db.delete(key_record)
-    db.commit()
-    return {"status": "revoked", "key_hash": request.key_hash}
+async def revoke_key(req: RevokeKeyRequest, master: str = Depends(verify_master_key), db = Depends(get_db)):
+    key_record = db.query(APIKey).filter(APIKey.key_hash == req.key_hash).first()
+    if key_record:
+        db.delete(key_record)
+        db.commit()
+        return {"status": "revoked"}
+    raise HTTPException(status_code=404, detail="Key not found")
 
 # =============================================================================
 # UI CONTENT
