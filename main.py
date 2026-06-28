@@ -188,6 +188,8 @@ _in_memory_keys = {}
 def hash_key(key: str) -> str:
     return hashlib.sha256(key.encode()).hexdigest()
 
+security = HTTPBearer()
+
 def verify_api_key(credentials: HTTPAuthorizationCredentials = Depends(security)):
     if not credentials:
         raise HTTPException(status_code=401, detail="Missing Authorization header. Use: Bearer YOUR_API_KEY")
