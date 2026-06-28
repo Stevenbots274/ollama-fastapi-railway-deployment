@@ -6,20 +6,25 @@ export OLLAMA_MAX_LOADED_MODELS=1
 export OLLAMA_KEEP_ALIVE=-1
 export OLLAMA_NOPRUNE=1
 
-case "$FLY_PROCESS_GROUP" in
-    "qwen")
-        MODEL_TO_PULL="qwen2.5:0.5b"
-        ;;
-    "tinyllama")
-        MODEL_TO_PULL="tinyllama:latest"
-        ;;
-    "llama3")
-        MODEL_TO_PULL="llama3.2:1b"
-        ;;
-    *)
-        MODEL_TO_PULL="tinyllama:latest"
-        ;;
-esac
+if [ -n "$MODEL_NAME" ]; then
+    echo "Using MODEL_NAME from environment: $MODEL_NAME"
+    MODEL_TO_PULL="$MODEL_NAME"
+else
+    case "$FLY_PROCESS_GROUP" in
+        "qwen")
+            MODEL_TO_PULL="qwen2.5:0.5b"
+            ;;
+        "tinyllama")
+            MODEL_TO_PULL="tinyllama:latest"
+            ;;
+        "llama3")
+            MODEL_TO_PULL="llama3.2:1b"
+            ;;
+        *)
+            MODEL_TO_PULL="tinyllama:latest"
+            ;;
+    esac
+fi
 
 echo "Starting Ollama server in background (Process Group: ${FLY_PROCESS_GROUP:-default})..."
 ollama serve &
