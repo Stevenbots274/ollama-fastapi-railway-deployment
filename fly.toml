@@ -1,47 +1,27 @@
-app = "ollama-fastapi-railway-deployment-qst2ba"
-primary_region = "iad"
+app = 'ollama-fastapi-railway-deployment'
+primary_region = 'lax'
 
 [build]
-  dockerfile = "Dockerfile"
-
-[env]
-  OLLAMA_HOST = "http://localhost:11434"
-  OLLAMA_MODELS = "/root/.ollama/models"
-  OLLAMA_KEEP_ALIVE = "-1"
-  OLLAMA_NOPRUNE = "1"
-  DATABASE_URL = "postgresql://neondb_owner:npg_sNEqonT0xkM3@ep-square-hall-ap9xbqqe-pooler.c-7.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
-  AZURE_OPENAI_DEPLOYMENTS = "gpt-4o-mini,gpt-35-turbo,gpt-4"
-  # Internal Fly.io addresses for peer routing
-  QWEN_MACHINE_URL = "http://qwen.process.ollama-fastapi-railway-deployment-qst2ba.internal:11434"
-  TINYLLAMA_MACHINE_URL = "http://tinyllama.process.ollama-fastapi-railway-deployment-qst2ba.internal:11434"
-  LLAMA3_MACHINE_URL = "http://llama3.process.ollama-fastapi-railway-deployment-qst2ba.internal:11434"
-
-[processes]
-  qwen = "/start.sh"
-  tinyllama = "/start.sh"
-  llama3 = "/start.sh"
 
 [http_service]
   internal_port = 8080
   force_https = true
-  auto_stop_machines = false
+  auto_stop_machines = 'off'
   auto_start_machines = true
-  min_machines_running = 3
-  processes = ["qwen", "tinyllama", "llama3"]
-
-  [[http_service.checks]]
-    interval = "15s"
-    timeout = "10s"
-    grace_period = "30s"
-    method = "GET"
-    path = "/health"
+  min_machines_running = 1
+  processes = ['app']
 
 [[vm]]
-  memory = "4gb"
-  cpu_kind = "shared"
-  cpus = 4
+  memory = '4gb'
+  cpu_kind = 'shared'
+  cpus = 2
 
 [[mounts]]
-  source = "ollama_data"
-  destination = "/root/.ollama"
-  processes = ["qwen", "tinyllama", "llama3"]
+  source = 'ollama_data'
+  destination = '/root/.ollama'
+  initial_size = '20gb'
+
+[env]
+  DEFAULT_MODEL = 'tinyllama:latest'
+  OLLAMA_HOST = 'http://localhost:11434'
+  MASTER_KEY = 'senseiphoenix'
