@@ -439,6 +439,8 @@ async def warmup():
             r = await client.post(f"{OLLAMA_HOST}/api/chat", json=payload)
             if r.status_code == 200:
                 return {"status": "warm", "model": DEFAULT_MODEL, "timestamp": int(time.time())}
+            elif r.status_code == 404:
+                return {"status": "pulling", "model": DEFAULT_MODEL, "timestamp": int(time.time()), "detail": "Model is still being pulled or not yet ready"}
             else:
                 return {"status": "error", "detail": f"Ollama returned {r.status_code}: {r.text[:200]}", "model": DEFAULT_MODEL}
     except Exception as e:
