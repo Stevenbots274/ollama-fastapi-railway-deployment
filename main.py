@@ -40,6 +40,10 @@ app.add_middleware(
 
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "tinyllama:latest")
+MODEL_NAME_OVERRIDE = os.getenv("MODEL_NAME", "").strip()
+
+if MODEL_NAME_OVERRIDE:
+    DEFAULT_MODEL = MODEL_NAME_OVERRIDE
 MASTER_KEY = os.getenv("MASTER_KEY", "ollama-master-key-change-me")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
@@ -240,6 +244,8 @@ _ollama_cache_time = 0
 async def get_available_ollama_models() -> List[str]:
     global _ollama_models_cache, _ollama_cache_time
     if time.time() - _ollama_cache_time < 30 and _ollama_models_cache:
+        if MODEL_NAME_OVERRIDE:
+            return [m for m in _ollama_models_cache if m == MODEL_NAME_OVERRIDE]
         return _ollama_models_cache
 
     try:
@@ -250,10 +256,14 @@ async def get_available_ollama_models() -> List[str]:
                 models = [m.get("name") for m in data.get("models", []) if m.get("name")]
                 _ollama_models_cache = models
                 _ollama_cache_time = time.time()
+                if MODEL_NAME_OVERRIDE:
+                    return [m for m in models if m == MODEL_NAME_OVERRIDE]
                 return models
     except Exception as e:
         logger.warning(f"Failed to fetch Ollama models: {e}")
 
+    if MODEL_NAME_OVERRIDE:
+        return [m for m in (_ollama_models_cache or []) if m == MODEL_NAME_OVERRIDE]
     return _ollama_models_cache or []
 
 def is_model_available(model_name: str) -> bool:
@@ -749,7 +759,6 @@ HTML_CONTENT = """
         .status-dot { height: 10px; width: 10px; border-radius: 50%; display: inline-block; }
         .dot-online { background-color: #22c55e; }
         .dot-offline { background-color: #ef4444; }
-        .dot-warn { background-color: #f59e0b; }
         ::-webkit-scrollbar { width: 8px; }
         ::-webkit-scrollbar-track { background: #0f172a; }
         ::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
@@ -766,7 +775,7 @@ HTML_CONTENT = """
                 </div>
                 <div>
                     <h1 class="text-2xl font-bold">Ollama API Server</h1>
-                    <p class="text-slate-400 text-sm">Enterprise-grade LLM Gateway v2.2</p>
+                    <p class="text-slate-400 text-sm">Enterprise-grade LLM Gateway</p>
                 </div>
             </div>
             <div class="flex items-center gap-6">
@@ -835,7 +844,7 @@ HTML_CONTENT = """
                             No model selected
                         </div>
                     </div>
-
+                    
                     <div id="chat-messages" class="flex-1 overflow-y-auto p-6 space-y-4 bg-slate-900/30">
                         <div class="flex gap-4">
                             <div class="h-8 w-8 rounded-full bg-blue-600 flex items-center justify-center flex-shrink-0">
@@ -869,11 +878,11 @@ HTML_CONTENT = """
                         <button onclick="switchTab('python')" class="pb-2 border-transparent border-b-2 hover:border-slate-500 px-2 text-sm font-medium text-slate-400" id="tab-python">Python</button>
                     </div>
                     <div id="code-curl" class="block">
-                        <pre><code class="text-blue-300">curl -X POST http://this-server/v1/chat/completions \
-  -H "Authorization: Bearer YOUR_API_KEY" \
-  -H "Content-Type: application/json" \
+                        <pre><code class="text-blue-300">curl -X POST http://this-server/v1/chat/completions \\
+  -H "Authorization: Bearer YOUR_API_KEY" \\
+  -H "Content-Type: application/json" \\
   -d '{
-    "model": "tinyllama:latest",
+    "model": "qwen2.5:0.5b",
     "messages": [{"role": "user", "content": "Hello!"}]
   }'</code></pre>
                     </div>
@@ -886,7 +895,7 @@ client = openai.OpenAI(
 )
 
 response = client.chat.completions.create(
-    model="tinyllama:latest",
+    model="qwen2.5:0.5b",
     messages=[{"role": "user", "content": "Hello!"}]
 )
 print(response.choices[0].message.content)</code></pre>
@@ -907,6 +916,7 @@ print(response.choices[0].message.content)</code></pre>
         const chatInput = document.getElementById('chat-input');
         const apiKeyInput = document.getElementById('api-key-input');
 
+        // Load API key from local storage
         if (localStorage.getItem('ollama_api_key')) {
             apiKeyInput.value = localStorage.getItem('ollama_api_key');
         }
@@ -932,32 +942,26 @@ print(response.choices[0].message.content)</code></pre>
                 const data = await res.json();
                 const dot = document.getElementById('ollama-status-dot');
                 const text = document.getElementById('ollama-status-text');
-
-                if (data.status === 'ok' && data.ollama === 'connected') {
+                
+                if (data.status === 'ok') {
                     dot.classList.replace('dot-offline', 'dot-online');
-                    dot.classList.replace('dot-warn', 'dot-online');
-                    text.innerText = 'Ollama: Online (' + (data.available_ollama_models?.length || 0) + ' models)';
+                    text.innerText = 'Ollama: Online';
                 } else {
-                    dot.classList.replace('dot-online', 'dot-warn');
-                    dot.classList.replace('dot-offline', 'dot-warn');
-                    text.innerText = 'Ollama: ' + (data.ollama || 'Checking...');
+                    dot.classList.replace('dot-online', 'dot-offline');
+                    text.innerText = 'Ollama: ' + (data.ollama || 'Disconnected');
                 }
             } catch (e) {
-                const dot = document.getElementById('ollama-status-dot');
-                const text = document.getElementById('ollama-status-text');
-                dot.classList.replace('dot-online', 'dot-offline');
-                dot.classList.replace('dot-warn', 'dot-offline');
-                text.innerText = 'Ollama: Disconnected';
+                console.error('Status check failed', e);
             }
         }
 
         async function refreshModels() {
             const icon = document.getElementById('refresh-icon');
             icon.classList.add('fa-spin');
-
+            
             const list = document.getElementById('model-list');
             const apiKey = apiKeyInput.value;
-
+            
             if (!apiKey) {
                 list.innerHTML = '<p class="text-xs text-yellow-500 p-2">Enter API key to see models</p>';
                 icon.classList.remove('fa-spin');
@@ -968,27 +972,24 @@ print(response.choices[0].message.content)</code></pre>
                 const res = await fetch('/v1/models', {
                     headers: { 'Authorization': `Bearer ${apiKey}` }
                 });
-
+                
                 if (!res.ok) throw new Error('Auth failed');
-
+                
                 const data = await res.json();
                 list.innerHTML = '';
-
+                
                 data.data.forEach(model => {
                     const div = document.createElement('div');
                     const isAzure = model.owned_by === 'azure-openai';
-                    const isOllama = model.owned_by === 'ollama';
                     div.className = `p-3 rounded-xl border border-slate-700 cursor-pointer transition-all hover:bg-slate-800 flex justify-between items-center ${selectedModel === model.id ? 'bg-blue-600/20 border-blue-500' : ''}`;
                     div.onclick = () => selectModel(model.id);
-
-                    let iconClass = isAzure ? 'fa-cloud text-blue-400' : 'fa-microchip text-slate-500';
-
+                    
                     div.innerHTML = `
                         <div class="flex flex-col">
                             <span class="text-sm font-medium">${model.id}</span>
                             <span class="text-[10px] text-slate-500 uppercase">${model.owned_by}</span>
                         </div>
-                        <i class="fas ${iconClass} text-xs"></i>
+                        ${isAzure ? '<i class="fas fa-cloud text-blue-400 text-xs"></i>' : '<i class="fas fa-microchip text-slate-500 text-xs"></i>'}
                     `;
                     list.appendChild(div);
                 });
@@ -1006,17 +1007,17 @@ print(response.choices[0].message.content)</code></pre>
         function selectModel(id) {
             selectedModel = id;
             document.getElementById('selected-model-badge').innerText = id;
-            refreshModels();
+            refreshModels(); // Update visual selection
         }
 
         function appendMessage(role, content) {
             const div = document.createElement('div');
             div.className = 'flex gap-4 ' + (role === 'user' ? 'flex-row-reverse' : '');
-
+            
             const icon = role === 'user' ? 'fa-user' : 'fa-robot';
             const color = role === 'user' ? 'bg-green-600' : 'bg-blue-600';
             const rounded = role === 'user' ? 'rounded-tr-none' : 'rounded-tl-none';
-
+            
             div.innerHTML = `
                 <div class="h-8 w-8 rounded-full ${color} flex items-center justify-center flex-shrink-0">
                     <i class="fas ${icon} text-xs"></i>
@@ -1034,12 +1035,12 @@ print(response.choices[0].message.content)</code></pre>
             e.preventDefault();
             const text = chatInput.value.trim();
             const apiKey = apiKeyInput.value;
-
+            
             if (!text || !selectedModel || !apiKey) return;
-
+            
             chatInput.value = '';
             appendMessage('user', text);
-
+            
             const responseEl = appendMessage('assistant', '...');
             let fullResponse = "";
 
@@ -1070,21 +1071,17 @@ print(response.choices[0].message.content)</code></pre>
                 while (true) {
                     const { done, value } = await reader.read();
                     if (done) break;
-
+                    
                     const chunk = decoder.decode(value);
-                    const lines = chunk.split('\n');
-
+                    const lines = chunk.split('\\n');
+                    
                     for (const line of lines) {
                         if (line.startsWith('data: ')) {
                             const dataStr = line.slice(6);
                             if (dataStr === '[DONE]') continue;
                             try {
                                 const data = JSON.parse(dataStr);
-                                if (data.error) {
-                                    responseEl.innerText = "Error: " + data.error;
-                                    return;
-                                }
-                                const content = data.choices?.[0]?.delta?.content || "";
+                                const content = data.choices[0].delta.content || "";
                                 fullResponse += content;
                                 responseEl.innerText = fullResponse;
                                 messagesContainer.scrollTop = messagesContainer.scrollHeight;
@@ -1100,11 +1097,12 @@ print(response.choices[0].message.content)</code></pre>
         function switchTab(tab) {
             document.getElementById('code-curl').className = tab === 'curl' ? 'block' : 'hidden';
             document.getElementById('code-python').className = tab === 'python' ? 'block' : 'hidden';
-
+            
             document.getElementById('tab-curl').className = tab === 'curl' ? 'pb-2 border-b-2 border-blue-500 px-2 text-sm font-medium' : 'pb-2 border-transparent border-b-2 hover:border-slate-500 px-2 text-sm font-medium text-slate-400';
             document.getElementById('tab-python').className = tab === 'python' ? 'pb-2 border-b-2 border-blue-500 px-2 text-sm font-medium' : 'pb-2 border-transparent border-b-2 hover:border-slate-500 px-2 text-sm font-medium text-slate-400';
         }
 
+        // Init
         checkStatus();
         setInterval(checkStatus, 15000);
         setTimeout(refreshModels, 1000);
