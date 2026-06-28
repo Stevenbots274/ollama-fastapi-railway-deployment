@@ -39,11 +39,20 @@ app.add_middleware(
 )
 
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
-DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "tinyllama:latest")
+# Align DEFAULT_MODEL with start.sh process groups
 MODEL_NAME_OVERRIDE = os.getenv("MODEL_NAME", "").strip()
-
 if MODEL_NAME_OVERRIDE:
     DEFAULT_MODEL = MODEL_NAME_OVERRIDE
+else:
+    process_group = os.getenv("FLY_PROCESS_GROUP", "")
+    if process_group == "qwen":
+        DEFAULT_MODEL = "qwen2.5:0.5b"
+    elif process_group == "tinyllama":
+        DEFAULT_MODEL = "tinyllama:latest"
+    elif process_group == "llama3":
+        DEFAULT_MODEL = "llama3.2:1b"
+    else:
+        DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "tinyllama:latest")
 MASTER_KEY = os.getenv("MASTER_KEY", "ollama-master-key-change-me")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
