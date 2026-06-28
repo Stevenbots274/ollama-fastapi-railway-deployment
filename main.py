@@ -43,6 +43,12 @@ DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "qwen2.5:0.5b")
 MASTER_KEY = os.getenv("MASTER_KEY", "ollama-master-key-change-me")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
+MODEL_TO_MACHINE_MAP = {
+    "qwen2.5:0.5b": os.getenv("QWEN_MACHINE_URL", ""),
+    "tinyllama:latest": os.getenv("TINYLLAMA_MACHINE_URL", ""),
+    "llama3:latest": os.getenv("LLAMA3_MACHINE_URL", ""),
+}
+
 # =============================================================================
 # AZURE OPENAI CONFIGURATION
 # =============================================================================
@@ -154,21 +160,53 @@ def init_db():
 @app.on_event("startup")
 async def startup_event():
     init_db()
+    asyncio.create_task(ensure_models_loaded())
     asyncio.create_task(keep_warm_background())
+
+async def ensure_models_loaded():
+    await asyncio.sleep(60)
+    models_to_ensure = ["qwen2.5:0.5b", "tinyllama:latest", "llama3:latest"]
+    process_group = os.getenv("FLY_PROCESS_GROUP", "")
+    if process_group == "qwen":
+        primary = "qwen2.5:0.5b"
+    elif process_group == "tinyllama":
+        primary = "tinyllama:latest"
+    elif process_group == "llama3":
+        primary = "llama3:latest"
+    else:
+        primary = DEFAULT_MODEL
+    
+    # Always ensure primary model is loaded
+    try:
+        async with httpx.AsyncClient(timeout=300) as client:
+            await client.post(f"{OLLAMA_HOST}/api/pull", json={"name": primary, "stream": False})
+            logger.info(f"Ensured primary model is loaded: {primary}")
+    except Exception as e:
+        logger.warning(f"Could not ensure model {primary}: {e}")
 
 async def keep_warm_background():
     await asyncio.sleep(30)
+    process_group = os.getenv("FLY_PROCESS_GROUP", "")
+    if process_group == "qwen":
+        warm_model = "qwen2.5:0.5b"
+    elif process_group == "tinyllama":
+        warm_model = "tinyllama:latest"
+    elif process_group == "llama3":
+        warm_model = "llama3:latest"
+    else:
+        warm_model = DEFAULT_MODEL
+    
     while True:
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 payload = {
-                    "model": DEFAULT_MODEL,
+                    "model": warm_model,
                     "messages": [{"role": "user", "content": "heartbeat"}],
                     "stream": False,
                     "options": {"num_predict": 1}
                 }
                 await client.post(f"{OLLAMA_HOST}/api/chat", json=payload)
-                logger.info(f"Aggressive keep-warm heartbeat sent for {DEFAULT_MODEL}")
+                logger.info(f"Keep-warm heartbeat sent for {warm_model}")
         except Exception as e:
             logger.warning(f"Keep-warm heartbeat failed: {e}")
         await asyncio.sleep(120)
@@ -253,7 +291,49 @@ def messages_to_prompt(messages: List[ChatMessage]) -> str:
     prompt_parts.append("Assistant:")
     return "\n\n".join(prompt_parts)
 
+async def ensure_model_present(model: str):
+    """Checks if a model is present locally, if not pulls it."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(f"{OLLAMA_HOST}/api/tags")
+            if r.status_code == 200:
+                models = [m.get("name") for m in r.json().get("models", [])]
+                if model in models:
+                    return True
+        
+        logger.info(f"Model {model} not found locally. Pulling...")
+        async with httpx.AsyncClient(timeout=300) as client:
+            await client.post(f"{OLLAMA_HOST}/api/pull", json={"name": model, "stream": False})
+            return True
+    except Exception as e:
+        logger.warning(f"Failed to ensure model {model}: {e}")
+        return False
+
+async def get_ollama_base_url(model: str):
+    """Returns the local Ollama host or a peer machine URL if configured."""
+    # Check if model is handled by another machine
+    peer_url = MODEL_TO_MACHINE_MAP.get(model)
+    if peer_url:
+        # If it's not the current machine's primary model, proxy it
+        process_group = os.getenv("FLY_PROCESS_GROUP", "")
+        is_primary = False
+        if process_group == "qwen" and model == "qwen2.5:0.5b": is_primary = True
+        elif process_group == "tinyllama" and model == "tinyllama:latest": is_primary = True
+        elif process_group == "llama3" and model == "llama3:latest": is_primary = True
+        
+        if not is_primary:
+            logger.info(f"Routing request for {model} to peer: {peer_url}")
+            return peer_url
+            
+    return OLLAMA_HOST
+
 async def ollama_chat_generate(model: str, messages: List[ChatMessage], stream: bool, temperature: float, max_tokens: int):
+    # Ensure model is available (pull if missing)
+    await ensure_model_present(model)
+    
+    # Determine which host to use (local or peer)
+    target_host = await get_ollama_base_url(model)
+    
     payload = {
         "model": model,
         "messages": [{"role": m.role, "content": m.content} for m in messages],
@@ -264,7 +344,7 @@ async def ollama_chat_generate(model: str, messages: List[ChatMessage], stream: 
     if stream:
         async def generator():
             async with httpx.AsyncClient(timeout=None) as client:
-                async with client.stream("POST", f"{OLLAMA_HOST}/api/chat", json=payload) as response:
+                async with client.stream("POST", f"{target_host}/api/chat", json=payload) as response:
                     if response.status_code != 200:
                         error_text = await response.aread()
                         yield f"data: {json.dumps({'error': error_text.decode()})}\n\n"
@@ -293,7 +373,7 @@ async def ollama_chat_generate(model: str, messages: List[ChatMessage], stream: 
         return generator()
     else:
         async with httpx.AsyncClient(timeout=120) as client:
-            r = await client.post(f"{OLLAMA_HOST}/api/chat", json=payload)
+            r = await client.post(f"{target_host}/api/chat", json=payload)
             if r.status_code != 200:
                 # Fallback to /api/generate
                 prompt = messages_to_prompt(messages)
@@ -303,7 +383,7 @@ async def ollama_chat_generate(model: str, messages: List[ChatMessage], stream: 
                     "stream": False,
                     "options": {"temperature": temperature, "num_predict": max_tokens}
                 }
-                r = await client.post(f"{OLLAMA_HOST}/api/generate", json=gen_payload)
+                r = await client.post(f"{target_host}/api/generate", json=gen_payload)
                 if r.status_code != 200:
                     raise HTTPException(status_code=r.status_code, detail=r.text)
                 gen_data = r.json()
@@ -368,16 +448,26 @@ async def ping():
 
 @app.post("/warmup")
 async def warmup():
+    process_group = os.getenv("FLY_PROCESS_GROUP", "")
+    if process_group == "qwen":
+        warm_model = "qwen2.5:0.5b"
+    elif process_group == "tinyllama":
+        warm_model = "tinyllama:latest"
+    elif process_group == "llama3":
+        warm_model = "llama3:latest"
+    else:
+        warm_model = DEFAULT_MODEL
+
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             payload = {
-                "model": DEFAULT_MODEL,
+                "model": warm_model,
                 "messages": [{"role": "user", "content": "Hi"}],
                 "stream": False,
                 "options": {"num_predict": 1}
             }
             await client.post(f"{OLLAMA_HOST}/api/chat", json=payload)
-            return {"status": "warm", "model": DEFAULT_MODEL, "timestamp": int(time.time())}
+            return {"status": "warm", "model": warm_model, "timestamp": int(time.time())}
     except Exception as e:
         return {"status": "error", "detail": str(e)}
 

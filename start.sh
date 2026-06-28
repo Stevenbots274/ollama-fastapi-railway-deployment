@@ -47,4 +47,17 @@ for i in $(seq 1 120); do
     sleep 1
 done
 
+# Background loop to ensure model never disappears
+(
+  while true; do
+    sleep 1800
+    if curl -s http://localhost:11434/api/tags | grep -q "$MODEL_TO_PULL"; then
+      echo "Model $MODEL_TO_PULL still present."
+    else
+      echo "Model $MODEL_TO_PULL missing! Re-pulling..."
+      ollama pull "$MODEL_TO_PULL"
+    fi
+  done
+) &
+
 wait $FASTAPI_PID

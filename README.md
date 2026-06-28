@@ -106,6 +106,6 @@ print(res.json())
 |-------|------|--------|
 | qwen2.5:0.5b | ~300MB | Yes |
 | tinyllama | ~600MB | Yes |
-| phi3:mini | ~2GB | Maybe (tight) |
+| llama3:latest | ~4.7GB | Yes (4GB RAM) |
 | llama3.2:1b | ~1.3GB | Maybe |
 # Trigger Deploy
